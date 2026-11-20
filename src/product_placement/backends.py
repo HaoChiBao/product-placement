@@ -8,7 +8,9 @@ from __future__ import annotations
 import mimetypes
 import os
 import random
+import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -20,6 +22,16 @@ from product_placement.higgsfield import (
     HiggsfieldClient,
     HiggsfieldError,
 )
+
+
+@dataclass
+class EditResult:
+    """Path plus optional identity for backends that report a paid sub-route."""
+
+    path: Path
+    backend: str = ""
+    request_id: str = ""
+    video_url: str = ""
 
 REPLICATE_API = "https://api.replicate.com/v1"
 REPLICATE_MODEL = "wan-video/wan-2.7-videoedit"
@@ -51,7 +63,7 @@ def seedance_edit(
     backend: str = "auto",
     poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
     client: HiggsfieldClient | None = None,
-) -> Path:
+) -> EditResult:
     """Existing Higgsfield Seedance 2.5 path (optional Genjutsu fallback)."""
     from product_placement.prepare import prepare_for_genjutsu
 
@@ -98,7 +110,13 @@ def seedance_edit(
                 result = _genjutsu(clip)
 
         hf.download(result.video_url, raw_out)
-        return mux_original_audio(raw_out, clip, out_path)
+        path = mux_original_audio(raw_out, clip, out_path)
+        return EditResult(
+            path=path,
+            backend=result.backend,
+            request_id=result.request_id,
+            video_url=result.video_url,
+        )
     finally:
         if owns:
             hf.close()
@@ -152,11 +170,16 @@ def build_wan27_input(
     Fields: video, prompt, reference_image, resolution, aspect_ratio,
     duration, audio_setting, seed. No disable_safety_checker in the schema.
     """
+    allowed = {"720p", "1080p"}
+    if resolution not in allowed:
+        raise ValueError(
+            f"wan27 resolution must be one of {sorted(allowed)}, got {resolution!r}"
+        )
     return {
         "video": video_url,
         "prompt": prompt,
         "reference_image": reference_image_url,
-        "resolution": resolution if resolution in {"720p", "1080p"} else "720p",
+        "resolution": resolution,
         "audio_setting": "origin",
     }
 
@@ -293,13 +316,16 @@ def build_wan_vace_body(
 
     Source also listed on fal model pages as fal-ai/wan-vace-apps/video-edit.
     """
+    allowed = {"auto", "240p", "360p", "480p", "580p", "720p"}
+    if resolution not in allowed:
+        raise ValueError(
+            f"wan-vace resolution must be one of {sorted(allowed)}, got {resolution!r}"
+        )
     return {
         "prompt": prompt,
         "video_url": video_url,
         "image_urls": [image_url],
-        "resolution": resolution if resolution in {
-            "auto", "240p", "360p", "480p", "580p", "720p"
-        } else "720p",
+        "resolution": resolution,
         "enable_safety_checker": False,
     }
 
@@ -410,6 +436,46 @@ def _require_modal_tokens() -> None:
         )
 
 
+def probe_portrait(clip: Path) -> bool:
+    """True when the first video stream is taller than wide."""
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-of",
+            "csv=p=0:s=x",
+            str(clip),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    text = (probe.stdout or "").strip()
+    if "x" not in text:
+        return False
+    try:
+        width_s, height_s = text.split("x", 1)
+        return int(height_s) > int(width_s)
+    except ValueError:
+        return False
+
+
+def modal_vace_hw(resolution: str, *, portrait: bool) -> tuple[int, int]:
+    """Return (height, width) for VACE-14B 480p/720p, matching source orientation."""
+    if resolution == "480p":
+        return (832, 480) if portrait else (480, 832)
+    if resolution == "720p":
+        return (1280, 720) if portrait else (720, 1280)
+    raise ValueError(
+        f"wan-vace-modal resolution must be '480p' or '720p', got {resolution!r}"
+    )
+
+
 def wan_vace_modal_edit(
     clip: Path,
     product: Path,
@@ -431,9 +497,7 @@ def wan_vace_modal_edit(
         fn = modal.Function.from_name(MODAL_APP_NAME, MODAL_FN_NAME)
         remote = fn.remote
 
-    height, width = (720, 1280) if resolution == "720p" else (480, 832)
-    if resolution == "1080p":
-        height, width = (720, 1280)  # VACE-14B sweet spot; keep 720p latents
+    height, width = modal_vace_hw(resolution, portrait=probe_portrait(clip))
 
     mp4 = remote(
         clip.read_bytes(),
@@ -448,7 +512,7 @@ def wan_vace_modal_edit(
     return mux_original_audio(raw_out, clip, out_path)
 
 
-MODELS: dict[str, Callable[..., Path]] = {
+MODELS: dict[str, Callable[..., Path | EditResult]] = {
     "seedance": seedance_edit,
     "wan27": wan27_edit,
     "wan-vace": wan_vace_edit,

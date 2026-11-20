@@ -94,4 +94,6 @@ def test_auto_falls_back_when_seedance_fails(tmp_path: Path, monkeypatch: pytest
         client=client,
     )
     assert result.model == "seedance"
+    assert result.backend == "genjutsu"
+    assert result.request_id == "g1"
     assert out.read_bytes() == b"OK"

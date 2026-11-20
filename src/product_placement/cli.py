@@ -37,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--resolution",
         choices=("480p", "720p", "1080p"),
         default="720p",
+        help="Supported set depends on --model (unsupported values error)",
     )
     swap_p.add_argument("--prompt", default=None, help="Override the default swap prompt")
     swap_p.add_argument("--work-dir", default="runs/swap")

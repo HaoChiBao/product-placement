@@ -129,6 +129,14 @@ def _decode_video_frames(video_bytes: bytes, max_frames: int = 81):
     return frames, float(fps)
 
 
+def _orient_hw(height: int, width: int, *, portrait: bool) -> tuple[int, int]:
+    """Keep the requested tier but match source orientation (no squash)."""
+    short, long = sorted((height, width))
+    if portrait:
+        return long, short  # taller than wide
+    return short, long
+
+
 def _resize_frames(frames, height: int, width: int):
     return [f.convert("RGB").resize((width, height)) for f in frames]
 
@@ -176,6 +184,8 @@ def edit(
     pipe = edit._pipe
 
     frames, fps = _decode_video_frames(video_bytes)
+    src_w, src_h = frames[0].size
+    height, width = _orient_hw(height, width, portrait=src_h > src_w)
     frames = _resize_frames(frames, height, width)
     mask = _full_generate_mask(len(frames), height, width)
     ref = Image.open(io.BytesIO(reference_image_bytes)).convert("RGB")

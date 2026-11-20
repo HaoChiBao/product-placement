@@ -12,6 +12,7 @@ from product_placement.backends import (
     MODELS,
     build_wan27_input,
     build_wan_vace_body,
+    modal_vace_hw,
     wan27_edit,
     wan_vace_edit,
     wan_vace_modal_edit,
@@ -38,6 +39,13 @@ def test_wan27_input_schema():
         "audio_setting": "origin",
     }
     assert "disable_safety_checker" not in body
+    with pytest.raises(ValueError, match="wan27 resolution"):
+        build_wan27_input(
+            video_url="u",
+            prompt="p",
+            reference_image_url="i",
+            resolution="480p",
+        )
 
 
 def test_wan_vace_body_schema():
@@ -50,6 +58,36 @@ def test_wan_vace_body_schema():
     assert body["enable_safety_checker"] is False
     assert body["image_urls"] == ["https://f/i.png"]
     assert body["video_url"] == "https://f/v.mp4"
+    with pytest.raises(ValueError, match="wan-vace resolution"):
+        build_wan_vace_body(
+            prompt="p",
+            video_url="u",
+            image_url="i",
+            resolution="1080p",
+        )
+
+
+def test_modal_vace_hw_respects_orientation():
+    assert modal_vace_hw("720p", portrait=False) == (720, 1280)
+    assert modal_vace_hw("720p", portrait=True) == (1280, 720)
+    assert modal_vace_hw("480p", portrait=True) == (832, 480)
+    with pytest.raises(ValueError, match="480p|720p"):
+        modal_vace_hw("1080p", portrait=False)
+
+
+def test_modal_orient_hw_helper():
+    # Import by path: modal_app is not part of the installed package.
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "modal_app" / "wan_vace.py"
+    spec = importlib.util.spec_from_file_location("wan_vace_modal_mod", path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(mod)
+    assert mod._orient_hw(720, 1280, portrait=True) == (1280, 720)
+    assert mod._orient_hw(1280, 720, portrait=False) == (720, 1280)
+    assert mod._orient_hw(480, 832, portrait=True) == (832, 480)
 
 
 def test_pipeline_routes_to_named_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -235,6 +273,7 @@ def test_wan_vace_modal_routes_remote(tmp_path: Path, monkeypatch: pytest.Monkey
         return Path(out_path)
 
     monkeypatch.setattr("product_placement.backends.mux_original_audio", fake_mux)
+    monkeypatch.setattr("product_placement.backends.probe_portrait", lambda _: True)
     path = wan_vace_modal_edit(
         clip,
         product,
@@ -247,6 +286,7 @@ def test_wan_vace_modal_routes_remote(tmp_path: Path, monkeypatch: pytest.Monkey
     assert seen["video"] == b"VIDEO"
     assert seen["image"] == b"IMAGE"
     assert seen["prompt"] == "swap mug"
+    assert seen["size"] == (1280, 720)
 
 
 def test_pipeline_routes_wan_vace_modal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

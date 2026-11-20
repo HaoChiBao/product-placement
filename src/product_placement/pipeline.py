@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from product_placement.backends import MODELS
+from product_placement.backends import MODELS, EditResult
 from product_placement.higgsfield import default_swap_prompt
 
 
@@ -57,11 +57,20 @@ def swap(
     elif model in {"wan27", "wan-vace"}:
         call_kwargs["poll_timeout_s"] = poll_timeout_s
 
-    path = edit(clip, product_image, text, **call_kwargs)
+    raw = edit(clip, product_image, text, **call_kwargs)
+    if isinstance(raw, EditResult):
+        return SwapResult(
+            out_path=raw.path,
+            model=model,
+            backend=raw.backend or model,
+            request_id=raw.request_id,
+            video_url=raw.video_url,
+            prompt=text,
+        )
     return SwapResult(
-        out_path=path,
+        out_path=raw,
         model=model,
-        backend=backend if model == "seedance" else model,
+        backend=model,
         request_id="",
         video_url="",
         prompt=text,
