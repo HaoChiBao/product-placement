@@ -33,7 +33,7 @@ def swap(
     resolution: str = "720p",
     prompt: str | None = None,
     work_dir: str | Path = "runs/swap",
-    poll_timeout_s: float = 900.0,
+    poll_timeout_s: float = 1200.0,
     client: HiggsfieldClient | None = None,
 ) -> SwapResult:
     """Upload inputs, run Seedance 2.5 (or Genjutsu fallback), download result."""

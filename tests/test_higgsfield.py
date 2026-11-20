@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from product_placement.higgsfield import (
+    DEFAULT_POLL_TIMEOUT_S,
     GENJUTSU_SWAP,
     SEEDANCE_EDIT,
     UPLOAD_URL,
@@ -36,20 +37,26 @@ def test_auth_header_missing():
         auth_header({})
 
 
-def test_seedance_body_has_no_duration():
+def test_seedance_body_matches_verified_live_shape():
     body = build_seedance_body(
         prompt="p",
         video_url="https://example.com/v.mp4",
-        image_url="https://example.com/i.png",
+        image_url="https://example.com/i.jpg",
         resolution="720p",
     )
     assert body == {
         "prompt": "p",
         "video_url": "https://example.com/v.mp4",
-        "image_urls": ["https://example.com/i.png"],
+        "image_urls": ["https://example.com/i.jpg"],
         "resolution": "720p",
+        "bitrate_mode": "high",
+        "generate_audio": True,
     }
     assert "duration" not in body
+
+
+def test_default_poll_timeout_is_at_least_20_minutes():
+    assert DEFAULT_POLL_TIMEOUT_S >= 1200.0
 
 
 def test_genjutsu_body_shape():
@@ -70,6 +77,44 @@ def test_default_prompt_mentions_target():
 
 def _transport(handler):
     return httpx.MockTransport(handler)
+
+
+def test_upload_put_has_no_authorization(tmp_path: Path):
+    product = tmp_path / "soda.jpg"
+    product.write_bytes(b"\xff\xd8\xff" + b"\x00" * 32)
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/files/generate-upload-url"):
+            body = json.loads(request.content.decode())
+            assert body == {"content_type": "image/jpeg"}
+            assert "Authorization" in request.headers
+            return httpx.Response(
+                200,
+                json={
+                    "public_url": "https://cdn.example.com/soda.jpg",
+                    "upload_url": "https://storage.example.com/put",
+                    "content_type": "image/jpeg",
+                    "upload_headers": {
+                        "Content-Type": "image/jpeg",
+                        "x-amz-tagging": "retention=temporary",
+                    },
+                },
+            )
+        if str(request.url) == "https://storage.example.com/put":
+            seen["put_headers"] = dict(request.headers)
+            assert request.method == "PUT"
+            assert "authorization" not in {k.lower() for k in request.headers.keys()}
+            return httpx.Response(200)
+        return httpx.Response(404, text=str(request.url))
+
+    with HiggsfieldClient(
+        client=httpx.Client(transport=_transport(handler)),
+        env={"HF_KEY": "id:secret"},
+        sleep=lambda _: None,
+    ) as hf:
+        assert hf.upload_file(product) == "https://cdn.example.com/soda.jpg"
+    assert "put_headers" in seen
 
 
 def test_upload_submit_poll_download(tmp_path: Path):
@@ -94,10 +139,14 @@ def test_upload_submit_poll_download(tmp_path: Path):
                 },
             )
         if str(request.url) == "https://storage.example.com/put":
-            assert request.method == "PUT"
+            assert "authorization" not in {k.lower() for k in request.headers.keys()}
             return httpx.Response(200)
         if str(request.url) == SEEDANCE_EDIT:
+            assert request.headers["Authorization"] == "Key id:secret"
+            assert "application/json" in request.headers["Content-Type"]
             body = json.loads(request.content.decode())
+            assert body["bitrate_mode"] == "high"
+            assert body["generate_audio"] is True
             assert "duration" not in body
             assert body["image_urls"] == ["https://cdn.example.com/soda.png"]
             return httpx.Response(
@@ -107,20 +156,28 @@ def test_upload_submit_poll_download(tmp_path: Path):
                     "request_id": "req-1",
                     "status_url": "https://api.higgsfield.ai/requests/req-1/status",
                     "cancel_url": "https://api.higgsfield.ai/requests/req-1/cancel",
+                    "expires_after": 604800,
                 },
             )
         if request.url.path.endswith("/requests/req-1/status"):
-            # First poll in-progress, second completed.
             if calls.count("GET /requests/req-1/status") == 1:
                 return httpx.Response(
                     200,
-                    json={"status": "in_progress", "request_id": "req-1"},
+                    json={
+                        "status": "in_progress",
+                        "request_id": "req-1",
+                        "status_url": "https://api.higgsfield.ai/requests/req-1/status",
+                        "cancel_url": "https://api.higgsfield.ai/requests/req-1/cancel",
+                    },
                 )
             return httpx.Response(
                 200,
                 json={
                     "status": "completed",
                     "request_id": "req-1",
+                    "status_url": "https://api.higgsfield.ai/requests/req-1/status",
+                    "cancel_url": "https://api.higgsfield.ai/requests/req-1/cancel",
+                    "expires_at": "2026-11-28T00:00:00Z",
                     "video": {"url": "https://cdn.example.com/out.mp4"},
                 },
             )
@@ -145,11 +202,11 @@ def test_upload_submit_poll_download(tmp_path: Path):
         )
         assert result.backend == "seedance"
         assert result.video_url.endswith("out.mp4")
+        assert "cost" not in result.raw
         hf.download(result.video_url, out)
 
     assert out.read_bytes() == b"FAKEMP4"
-    assert sleeps  # polling waited once
-    assert any(SEEDANCE_EDIT.endswith(c.split()[-1]) or "seedance" in c for c in calls) or True
+    assert sleeps
 
 
 def test_poll_failure_raises():
@@ -171,36 +228,23 @@ def test_poll_failure_raises():
             hf._as_result(done, backend="seedance")
 
 
-def test_auto_fallback_to_genjutsu(tmp_path: Path):
-    from product_placement.pipeline import swap
+def test_download_error_raises_higgsfield_error(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, headers={"content-type": "text/plain"})
 
-    product = tmp_path / "soda.png"
-    product.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16)
-    clip = tmp_path / "clip.mp4"
-    # Tiny valid-enough file; prepare_for_genjutsu will call ffmpeg — skip by
-    # stubbing prepare in this test via direct client path instead.
-    clip.write_bytes(b"not-a-real-mp4")
+    with HiggsfieldClient(
+        client=httpx.Client(transport=_transport(handler)),
+        env={"HF_KEY": "id:secret"},
+        sleep=lambda _: None,
+    ) as hf:
+        with pytest.raises(HiggsfieldError, match=r"download failed \(403\)"):
+            hf.download("https://cdn.example.com/missing.mp4", tmp_path / "x.mp4")
 
+
+def test_auto_fallback_to_genjutsu_client_level():
     state = {"seedance": 0, "genjutsu": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/files/generate-upload-url"):
-            name = "clip.mp4" if "video" in (request.read() and "") else "file"
-            # content-type from body
-            body = json.loads(request.content.decode())
-            ctype = body["content_type"]
-            key = "clip.mp4" if ctype == "video/mp4" else "soda.png"
-            return httpx.Response(
-                200,
-                json={
-                    "public_url": f"https://cdn.example.com/{key}",
-                    "upload_url": f"https://storage.example.com/{key}",
-                    "content_type": ctype,
-                    "upload_headers": {"Content-Type": ctype},
-                },
-            )
-        if request.url.host == "storage.example.com":
-            return httpx.Response(200)
         if str(request.url) == SEEDANCE_EDIT:
             state["seedance"] += 1
             return httpx.Response(503, text="unavailable")
@@ -224,11 +268,8 @@ def test_auto_fallback_to_genjutsu(tmp_path: Path):
                     "video": {"url": "https://cdn.example.com/out.mp4"},
                 },
             )
-        if str(request.url) == "https://cdn.example.com/out.mp4":
-            return httpx.Response(200, content=b"GENOUT")
-        return httpx.Response(500, text=str(request.url))
+        return httpx.Response(404, text=str(request.url))
 
-    # Unit-test fallback at client level (pipeline also needs ffmpeg prepare).
     with HiggsfieldClient(
         client=httpx.Client(transport=_transport(handler)),
         env={"HF_KEY": "id:secret"},
@@ -247,16 +288,3 @@ def test_auto_fallback_to_genjutsu(tmp_path: Path):
         )
         assert result.backend == "genjutsu"
         assert state["genjutsu"] == 1
-
-
-def test_download_error_raises_higgsfield_error(tmp_path: Path):
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, headers={"content-type": "text/plain"})
-
-    with HiggsfieldClient(
-        client=httpx.Client(transport=_transport(handler)),
-        env={"HF_KEY": "id:secret"},
-        sleep=lambda _: None,
-    ) as hf:
-        with pytest.raises(HiggsfieldError, match=r"download failed \(403\)"):
-            hf.download("https://cdn.example.com/missing.mp4", tmp_path / "x.mp4")

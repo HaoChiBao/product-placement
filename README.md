@@ -45,6 +45,7 @@ Options:
 - `--backend auto|seedance|genjutsu` (default `auto`: Seedance, then Genjutsu on failure)
 - `--resolution 480p|720p|1080p` (default `720p`)
 - `--prompt "..."` to override the default swap prompt
+- `--poll-timeout` seconds (default 1200; live Seedance jobs can take ~10+ minutes)
 
 ### What the call does
 

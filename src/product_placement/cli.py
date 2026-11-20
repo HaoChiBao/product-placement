@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     swap_p.add_argument("--prompt", default=None, help="Override the default swap prompt")
     swap_p.add_argument("--work-dir", default="runs/swap")
-    swap_p.add_argument("--poll-timeout", type=float, default=900.0)
+    swap_p.add_argument("--poll-timeout", type=float, default=1200.0)
     return parser
 
 

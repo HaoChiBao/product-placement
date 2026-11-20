@@ -50,6 +50,9 @@ def auth_header(
     )
 
 
+DEFAULT_POLL_TIMEOUT_S = 1200.0  # live Seedance jobs can take ~10+ minutes
+
+
 def build_seedance_body(
     *,
     prompt: str,
@@ -57,12 +60,14 @@ def build_seedance_body(
     image_url: str,
     resolution: str = "720p",
 ) -> dict[str, Any]:
-    # Docs: do not send duration; output length comes from the source video.
+    # Verified live shape: no duration; include bitrate_mode + generate_audio.
     return {
         "prompt": prompt,
         "video_url": video_url,
         "image_urls": [image_url],
         "resolution": resolution,
+        "bitrate_mode": "high",
+        "generate_audio": True,
     }
 
 
@@ -145,7 +150,11 @@ class HiggsfieldClient:
             upload_headers["Content-Type"] = content_type
 
         data = path.read_bytes()
-        put = self._client.put(upload_url, headers=upload_headers, content=data)
+        # Presigned PUT must not carry Higgsfield Authorization.
+        put_headers = {
+            k: v for k, v in upload_headers.items() if k.lower() != "authorization"
+        }
+        put = self._client.put(upload_url, headers=put_headers, content=data)
         if put.status_code >= 400:
             raise HiggsfieldError(
                 f"presigned upload failed ({put.status_code}): {put.text}"
@@ -171,10 +180,10 @@ class HiggsfieldClient:
         self,
         status_url: str,
         *,
-        timeout_s: float = 900.0,
+        timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
         initial_delay_s: float = 2.0,
     ) -> dict[str, Any]:
-        """Poll until a terminal status. Docs: start at 2s, back off to 10s."""
+        """Poll until a terminal status. Start at 2s, back off to 10s."""
         deadline = time.monotonic() + timeout_s
         delay = initial_delay_s
         last: dict[str, Any] = {}
@@ -226,7 +235,7 @@ class HiggsfieldClient:
         video_url: str,
         image_url: str,
         resolution: str = "720p",
-        poll_timeout_s: float = 900.0,
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
     ) -> JobResult:
         body = build_seedance_body(
             prompt=prompt,
@@ -245,7 +254,7 @@ class HiggsfieldClient:
         video_url: str,
         image_url: str,
         resolution: str = "720p",
-        poll_timeout_s: float = 900.0,
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
     ) -> JobResult:
         body = build_genjutsu_body(
             prompt=prompt,
