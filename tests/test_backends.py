@@ -75,19 +75,27 @@ def test_modal_vace_hw_respects_orientation():
         modal_vace_hw("1080p", portrait=False)
 
 
-def test_modal_orient_hw_helper():
-    # Import by path: modal_app is not part of the installed package.
-    import importlib.util
-    from pathlib import Path
+def test_wan27_rejects_bad_resolution_before_upload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("REPLICATE_API_TOKEN", "tok")
+    calls = {"n": 0}
 
-    path = Path(__file__).resolve().parents[1] / "modal_app" / "wan_vace.py"
-    spec = importlib.util.spec_from_file_location("wan_vace_modal_mod", path)
-    mod = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(mod)
-    assert mod._orient_hw(720, 1280, portrait=True) == (1280, 720)
-    assert mod._orient_hw(1280, 720, portrait=False) == (720, 1280)
-    assert mod._orient_hw(480, 832, portrait=True) == (832, 480)
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(500, text="should not upload")
+
+    with pytest.raises(ValueError, match="wan27 resolution"):
+        wan27_edit(
+            tmp_path / "c.mp4",
+            tmp_path / "p.png",
+            "p",
+            out_path=tmp_path / "o.mp4",
+            work_dir=tmp_path / "w",
+            resolution="480p",
+            client=httpx.Client(transport=httpx.MockTransport(handler)),
+        )
+    assert calls["n"] == 0
 
 
 def test_pipeline_routes_to_named_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

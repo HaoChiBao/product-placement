@@ -196,6 +196,13 @@ def wan27_edit(
     client: httpx.Client | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Path:
+    # Validate before any paid upload.
+    build_wan27_input(
+        video_url="https://example.invalid/v",
+        prompt=prompt,
+        reference_image_url="https://example.invalid/i",
+        resolution=resolution,
+    )
     token = _replicate_token()
     work_dir.mkdir(parents=True, exist_ok=True)
     owns = client is None
@@ -342,6 +349,13 @@ def wan_vace_edit(
     client: httpx.Client | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Path:
+    # Validate before any paid upload.
+    build_wan_vace_body(
+        prompt=prompt,
+        video_url="https://example.invalid/v",
+        image_url="https://example.invalid/i",
+        resolution=resolution,
+    )
     key = _fal_key()
     work_dir.mkdir(parents=True, exist_ok=True)
     owns = client is None
@@ -487,6 +501,8 @@ def wan_vace_modal_edit(
     remote: Callable[..., bytes] | None = None,
 ) -> Path:
     """Call the deployed Modal WanVACE function; mux original audio back."""
+    # Validate resolution before probing/calling Modal.
+    modal_vace_hw(resolution, portrait=False)
     _require_modal_tokens()
     work_dir.mkdir(parents=True, exist_ok=True)
     raw_out = work_dir / "wan_vace_modal_raw.mp4"
