@@ -1,4 +1,4 @@
-"""Generative product placement via Higgsfield video edit APIs."""
+"""Generative product placement via pluggable video-edit backends."""
 
 __version__ = "0.2.0"
 

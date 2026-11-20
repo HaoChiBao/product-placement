@@ -1,8 +1,59 @@
 # product-placement
 
-`swap(clip, target, product_image) -> new_clip` using a generative video-edit API.
+`swap(clip, target, product_image) -> new_clip` using a pluggable generative video-edit backend.
 
-Primary path: **ByteDance Seedance 2.5** video-edit on Higgsfield. Fallback: **Genjutsu object-swap**. Overlay/compositing is gone; the model does the replacement.
+```bash
+python -m product_placement swap \
+  --model seedance|wan27|wan-vace|wan-vace-modal \
+  --clip assets/samples/hand_held_cup.mp4 \
+  --target "metal mug" \
+  --product assets/samples/soda_can.png \
+  --out out.mp4
+```
+
+Original clip audio is muxed back onto the edited video for every model.
+
+## Models
+
+| `--model` | Provider | Credentials |
+|-----------|----------|-------------|
+| `seedance` (default) | Higgsfield Seedance 2.5 (+ Genjutsu fallback via `--backend`) | `HF_KEY` or `HF_API_KEY_ID` + `HF_API_KEY_SECRET` |
+| `wan27` | Replicate `wan-video/wan-2.7-videoedit` | `REPLICATE_API_TOKEN` |
+| `wan-vace` | fal `fal-ai/wan-vace-apps/video-edit` | `FAL_KEY` |
+| `wan-vace-modal` | Self-hosted Wan 2.1 VACE 14B on Modal | `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET` |
+
+### seedance
+
+Higgsfield `POST .../bytedance/seedance-2.5/video-edit`. `--backend auto|seedance|genjutsu` (default `auto`).
+
+### wan27
+
+Replicate input: `video`, `prompt`, `reference_image`, `resolution`, `audio_setting=origin`. Schema source: https://replicate.com/wan-video/wan-2.7-videoedit/api — no `disable_safety_checker` field.
+
+### wan-vace
+
+fal queue body: `prompt`, `video_url`, `image_urls`, `resolution`, `enable_safety_checker: false`. Schema source: fal `wan-vace-apps/video-edit`.
+
+### wan-vace-modal (self-host)
+
+Runs open **Wan-AI/Wan2.1-VACE-14B** (Diffusers id `Wan-AI/Wan2.1-VACE-14B-diffusers`) on Modal.
+
+**VACE task:** reference-guided masked V2V — source frames + full-frame white mask (generate) + product as `reference_images`. Region masks from the old Grounding/SAM overlay path are not on this branch, so we do not build a partial object mask.
+
+**Entry point:** Diffusers [`WanVACEPipeline`](https://huggingface.co/docs/diffusers/api/pipelines/wan) (same task surface as Wan2.1 [`generate.py --task vace-14B`](https://github.com/Wan-Video/Wan2.1/blob/main/generate.py)).
+
+Deploy (needs Modal account + GPU billing):
+
+```bash
+pip install modal
+modal token set   # or export MODAL_TOKEN_ID / MODAL_TOKEN_SECRET
+modal deploy modal_app/wan_vace.py
+```
+
+- **GPU:** H100 (80GB). Weights cached in Modal Volume `wan-vace-14b-weights`.
+- **Rough cost:** H100 ≈ $0.0011/s (~$3.95/hr). A short 720p clip (~3–8 min wall time once warm) is roughly **$0.20–$0.60**; cold start + weight load can push a first clip toward **~$1–3**. Not verified live in this repo.
+
+Client looks up `modal.Function.from_name("product-placement-wan-vace", "edit")`. Missing `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` raises an error that names them.
 
 ## Setup
 
@@ -13,50 +64,7 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-`ffmpeg` is required for Genjutsu prep (upscale / trim).
-
-### Credentials
-
-Export one of:
-
-```bash
-export HF_KEY='YOUR_KEY_ID:YOUR_KEY_SECRET'
-# or
-export HF_API_KEY_ID='YOUR_KEY_ID'
-export HF_API_KEY_SECRET='YOUR_KEY_SECRET'
-```
-
-Keys are read from the environment only. Create them in the [Higgsfield Console](https://console.higgsfield.ai). The account needs API credit for a live run.
-
-## Live run
-
-Once the key and credits are available:
-
-```bash
-python -m product_placement swap \
-  --clip assets/samples/hand_held_cup.mp4 \
-  --target "metal mug" \
-  --product assets/samples/soda_can.png \
-  --out out.mp4
-```
-
-Options:
-
-- `--backend auto|seedance|genjutsu` (default `auto`: Seedance, then Genjutsu on failure)
-- `--resolution 480p|720p|1080p` (default `720p`)
-- `--prompt "..."` to override the default swap prompt
-- `--poll-timeout` seconds (default 1200; live Seedance jobs can take ~10+ minutes)
-
-### What the call does
-
-1. Upload the clip and product image through Higgsfield `POST /files/generate-upload-url`, then PUT to the presigned URL.
-2. `POST https://api.higgsfield.ai/bytedance/seedance-2.5/video-edit` with `{prompt, video_url, image_urls, resolution}` (no `duration`).
-3. Poll `status_url` until `completed` / `failed` / `nsfw` / `canceled`, then download `video.url`.
-4. On Seedance failure with `--backend auto`, prepare the clip for Genjutsu (upscale to ≥409,600 px/frame, trim to ≤30 s, require ≥4 s) and call `POST .../higgsfield/genjutsu/object-swap/v1.0`.
-
-Default prompt:
-
-> Replace the {target} in @Video1 with the product in @Image1. Keep the hands, camera motion, lighting and everything else identical.
+`ffmpeg` is required (Genjutsu prep + audio mux).
 
 ## Sample assets
 
@@ -65,7 +73,7 @@ Default prompt:
 
 ## Optional eval
 
-Not on the critical path. Install `pip install -e '.[eval]'`, then call `product_placement.eval.evaluate_swap(...)` to score mask-region change vs outside-mask drift and flicker (Grounding DINO box on the prompt frame).
+`pip install -e '.[eval]'`, then `product_placement.eval.evaluate_swap(...)`.
 
 ## Tests
 
@@ -73,15 +81,19 @@ Not on the critical path. Install `pip install -e '.[eval]'`, then call `product
 pytest -q
 ```
 
-Uses mocked HTTP only; CI does not call Higgsfield.
+Mocked HTTP / Modal client routing only; CI does not call live APIs or deploy Modal.
 
 ## Package
 
 ```
 src/product_placement/
-  higgsfield.py   # auth, upload, submit, poll, download
-  prepare.py      # Genjutsu duration / min-pixel prep via ffmpeg
-  pipeline.py     # swap()
+  backends.py     # seedance / wan27 / wan-vace / wan-vace-modal
+  audio.py        # mux original audio
+  higgsfield.py
+  prepare.py
+  pipeline.py
   cli.py
-  eval.py         # optional offline metrics
+  eval.py
+modal_app/
+  wan_vace.py     # Modal deploy target
 ```

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "product-placement"
 version = "0.2.0"
-description = "Generative product placement via Higgsfield Seedance 2.5 / Genjutsu"
+description = "Generative product placement via pluggable video-edit backends"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

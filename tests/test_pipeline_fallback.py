@@ -8,8 +8,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-import product_placement.pipeline as pipeline
+import product_placement.backends as backends
 from product_placement.higgsfield import GENJUTSU_SWAP, SEEDANCE_EDIT, HiggsfieldClient
+from product_placement.pipeline import swap
 
 
 def test_auto_falls_back_when_seedance_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -25,7 +26,16 @@ def test_auto_falls_back_when_seedance_fails(tmp_path: Path, monkeypatch: pytest
         path.write_bytes(b"prepared")
         return path
 
-    monkeypatch.setattr(pipeline, "prepare_for_genjutsu", fake_prepare)
+    monkeypatch.setattr(backends, "prepare_for_genjutsu", fake_prepare, raising=False)
+    monkeypatch.setattr(
+        "product_placement.prepare.prepare_for_genjutsu", fake_prepare
+    )
+
+    def fake_mux(edited, original, out_path):
+        Path(out_path).write_bytes(Path(edited).read_bytes())
+        return Path(out_path)
+
+    monkeypatch.setattr(backends, "mux_original_audio", fake_mux)
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/files/generate-upload-url"):
@@ -73,14 +83,15 @@ def test_auto_falls_back_when_seedance_fails(tmp_path: Path, monkeypatch: pytest
         env={"HF_KEY": "id:secret"},
         sleep=lambda _: None,
     )
-    result = pipeline.swap(
+    result = swap(
         clip=clip,
         target="metal mug",
         product_image=product,
         out=out,
+        model="seedance",
         backend="auto",
         work_dir=tmp_path / "work",
         client=client,
     )
-    assert result.backend == "genjutsu"
+    assert result.model == "seedance"
     assert out.read_bytes() == b"OK"

@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import time
 
+from product_placement.backends import MODELS
 from product_placement.pipeline import swap
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="product_placement",
-        description="Swap a target object for a product image via Higgsfield.",
+        description="Swap a target object for a product image via a video-edit model.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -21,10 +22,16 @@ def build_parser() -> argparse.ArgumentParser:
     swap_p.add_argument("--product", required=True, help="Product image path (PNG/JPEG)")
     swap_p.add_argument("--out", required=True, help="Output video path")
     swap_p.add_argument(
+        "--model",
+        choices=sorted(MODELS),
+        default="seedance",
+        help="Edit backend (default: seedance)",
+    )
+    swap_p.add_argument(
         "--backend",
         choices=("auto", "seedance", "genjutsu"),
         default="auto",
-        help="seedance (default path), genjutsu, or auto fallback",
+        help="Only for --model seedance: seedance, genjutsu, or auto fallback",
     )
     swap_p.add_argument(
         "--resolution",
@@ -49,6 +56,7 @@ def main(argv: list[str] | None = None) -> None:
         target=args.target,
         product_image=args.product,
         out=args.out,
+        model=args.model,
         backend=args.backend,
         resolution=args.resolution,
         prompt=args.prompt,
@@ -56,10 +64,8 @@ def main(argv: list[str] | None = None) -> None:
         poll_timeout_s=args.poll_timeout,
     )
     elapsed = time.perf_counter() - t0
-    print(
-        f"Wrote {result.out_path} via {result.backend} "
-        f"(request_id={result.request_id}) in {elapsed:.1f}s"
-    )
+    label = result.backend if result.model == "seedance" else result.model
+    print(f"Wrote {result.out_path} via {label} in {elapsed:.1f}s")
 
 
 if __name__ == "__main__":
