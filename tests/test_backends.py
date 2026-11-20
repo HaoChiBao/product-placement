@@ -266,14 +266,19 @@ def test_wan_vace_modal_routes_remote(tmp_path: Path, monkeypatch: pytest.Monkey
     clip.write_bytes(b"VIDEO")
     product = tmp_path / "p.png"
     product.write_bytes(b"IMAGE")
+    mask = tmp_path / "mask.mp4"
+    mask.write_bytes(b"MASK")
     out = tmp_path / "o.mp4"
     seen = {}
 
-    def fake_remote(video_bytes, image_bytes, prompt, *, height, width):
+    def fake_remote(
+        video_bytes, image_bytes, prompt, *, height, width, mask_video_bytes=None
+    ):
         seen["video"] = video_bytes
         seen["image"] = image_bytes
         seen["prompt"] = prompt
         seen["size"] = (height, width)
+        seen["mask"] = mask_video_bytes
         return b"MODAL-MP4"
 
     def fake_mux(edited, original, out_path):
@@ -288,6 +293,7 @@ def test_wan_vace_modal_routes_remote(tmp_path: Path, monkeypatch: pytest.Monkey
         "swap mug",
         out_path=out,
         work_dir=tmp_path / "w",
+        mask=mask,
         remote=fake_remote,
     )
     assert path.read_bytes() == b"MODAL-MP4"
@@ -295,6 +301,18 @@ def test_wan_vace_modal_routes_remote(tmp_path: Path, monkeypatch: pytest.Monkey
     assert seen["image"] == b"IMAGE"
     assert seen["prompt"] == "swap mug"
     assert seen["size"] == (1280, 720)
+    assert seen["mask"] == b"MASK"
+
+    seen.clear()
+    wan_vace_modal_edit(
+        clip,
+        product,
+        "swap mug",
+        out_path=tmp_path / "o2.mp4",
+        work_dir=tmp_path / "w2",
+        remote=fake_remote,
+    )
+    assert seen["mask"] is None
 
 
 def test_pipeline_routes_wan_vace_modal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

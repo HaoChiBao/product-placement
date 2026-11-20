@@ -498,9 +498,14 @@ def wan_vace_modal_edit(
     out_path: Path,
     work_dir: Path,
     resolution: str = "720p",
+    mask: Path | None = None,
     remote: Callable[..., bytes] | None = None,
 ) -> Path:
-    """Call the deployed Modal WanVACE function; mux original audio back."""
+    """Call the deployed Modal WanVACE function; mux original audio back.
+
+    `mask` is a mask video (white = replace, black = keep), same frame count as
+    the clip. Without it VACE regenerates the whole frame.
+    """
     # Validate resolution before probing/calling Modal.
     modal_vace_hw(resolution, portrait=False)
     _require_modal_tokens()
@@ -521,6 +526,7 @@ def wan_vace_modal_edit(
         prompt,
         height=height,
         width=width,
+        mask_video_bytes=mask.read_bytes() if mask else None,
     )
     if not isinstance(mp4, (bytes, bytearray)):
         raise RuntimeError(f"Modal edit returned unexpected type: {type(mp4)!r}")

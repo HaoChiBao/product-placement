@@ -38,7 +38,9 @@ fal queue body: `prompt`, `video_url`, `image_urls`, `resolution`, `enable_safet
 
 Runs open **Wan-AI/Wan2.1-VACE-14B** (Diffusers id `Wan-AI/Wan2.1-VACE-14B-diffusers`) on Modal.
 
-**VACE task:** reference-guided masked V2V — source frames + full-frame white mask (generate) + product as `reference_images`. Region masks from the old Grounding/SAM overlay path are not on this branch, so we do not build a partial object mask.
+**VACE task:** reference-guided masked inpainting — source frames + a mask video of the target object (white = replace; masked pixels are grayed per VACE convention) + product as `reference_images`. Without a mask the whole frame is regenerated and the object usually is not swapped. Use a generous, single-blob mask (dilated convex hull of the target); a tight object-shaped mask makes VACE redraw the original object.
+
+Optional `distill=True` on the Modal function enables the LightX2V step/CFG-distill LoRA (`Kijai/WanVideo_comfy`, `Lightx2v/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16.safetensors`): use ~6 steps and `guidance_scale=1.0` for fast drafts (~3x faster per round), then a full run (20 steps, guidance 5) for the final, which follows the reference more faithfully.
 
 **Entry point:** Diffusers [`WanVACEPipeline`](https://huggingface.co/docs/diffusers/api/pipelines/wan) (same task surface as Wan2.1 [`generate.py --task vace-14B`](https://github.com/Wan-Video/Wan2.1/blob/main/generate.py)).
 
