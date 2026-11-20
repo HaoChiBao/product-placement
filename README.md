@@ -1,6 +1,6 @@
 # product-placement
 
-`swap(clip, target, product_image) -> new_clip` using a pluggable generative video-edit backend.
+`swap(clip, target, product_image) -> new_clip` using a pluggable generative video-edit backend. Design notes for collaborators: [docs/DESIGN.md](docs/DESIGN.md).
 
 ```bash
 python -m product_placement swap \
