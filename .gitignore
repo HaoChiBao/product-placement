@@ -1,3 +1,11 @@
+# Local env / model weights / scratch (not part of the source tree)
+.venv/
+venv/
+checkpoints/*.pt
+third_party/
+runs/
+assets/samples/*_raw.mp4
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

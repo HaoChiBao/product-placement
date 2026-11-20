@@ -1,0 +1,5 @@
+command: python -m product_placement swap --clip assets/samples/coffee_cup.mp4 --target 'coffee cup' --product assets/samples/soda_can.png --out artifacts/swap_out.mp4 --device cpu --work-dir runs/proof --sam-checkpoint checkpoints/sam2.1_hiera_tiny.pt --side-by-side artifacts/side_by_side.jpg --mask-overlay artifacts/mask_overlay.jpg
+device: cpu
+runtime_seconds: 91.9
+frames: 60 @ 12.0 fps
+detection: label=coffee cup score=0.952 box=[119.93379211425781, 206.8999481201172, 333.0783386230469, 417.75830078125]
