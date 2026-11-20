@@ -43,9 +43,15 @@ def write_video(path: str | Path, frames: list[np.ndarray], fps: float) -> None:
 
 
 def extract_jpeg_frames(frames: list[np.ndarray], out_dir: str | Path) -> Path:
-    """Write RGB frames as sequential JPEGs for SAM 2 video init."""
+    """Write RGB frames as sequential JPEGs for SAM 2 video init.
+
+    Clears any prior JPEGs in out_dir so a shorter clip cannot leave stale
+    frames that SAM 2 would load on the next run.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    for old in out_dir.glob("*.jpg"):
+        old.unlink()
     for i, frame in enumerate(frames):
         bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         cv2.imwrite(str(out_dir / f"{i:05d}.jpg"), bgr)

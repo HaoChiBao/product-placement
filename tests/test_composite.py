@@ -1,4 +1,6 @@
-"""Composite-step unit tests that need no model weights."""
+"""Unit tests that need no model weights."""
+
+from pathlib import Path
 
 import numpy as np
 
@@ -9,6 +11,7 @@ from product_placement.composite import (
     mask_bbox,
     warp_product_to_mask,
 )
+from product_placement.io import extract_jpeg_frames
 
 
 def _make_product(w: int = 40, h: int = 80) -> np.ndarray:
@@ -56,3 +59,15 @@ def test_composite_clip_length():
     out = composite_clip(frames, masks, _make_product(16, 24), feather_radius=1)
     assert len(out) == 3
     assert out[0].shape == (32, 32, 3)
+
+
+def test_extract_jpeg_frames_clears_stale_files(tmp_path: Path):
+    out = tmp_path / "jpeg_frames"
+    long_clip = [np.zeros((8, 8, 3), dtype=np.uint8) for _ in range(5)]
+    extract_jpeg_frames(long_clip, out)
+    assert (out / "00004.jpg").exists()
+
+    short_clip = [np.full((8, 8, 3), 10, dtype=np.uint8) for _ in range(2)]
+    extract_jpeg_frames(short_clip, out)
+    remaining = sorted(p.name for p in out.glob("*.jpg"))
+    assert remaining == ["00000.jpg", "00001.jpg"]

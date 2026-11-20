@@ -60,9 +60,23 @@ def track_masks(
         )
 
     masks: list[np.ndarray | None] = [None] * len(frames)
-    for idx, _obj_ids, video_res_masks in predictor.propagate_in_video(state):
-        mask = video_res_masks[0, 0].detach().float().cpu().numpy()
-        masks[idx] = np.clip(mask, 0.0, 1.0).astype(np.float32)
+
+    def _consume(outputs) -> None:
+        for idx, _obj_ids, video_res_masks in outputs:
+            mask = video_res_masks[0, 0].detach().float().cpu().numpy()
+            masks[idx] = np.clip(mask, 0.0, 1.0).astype(np.float32)
+
+    # Forward from the prompt frame, then reverse so mid-clip prompts
+    # still cover frames before --frame.
+    _consume(predictor.propagate_in_video(state, start_frame_idx=frame_index))
+    if frame_index > 0:
+        _consume(
+            predictor.propagate_in_video(
+                state,
+                start_frame_idx=frame_index,
+                reverse=True,
+            )
+        )
 
     missing = [i for i, m in enumerate(masks) if m is None]
     if missing:
