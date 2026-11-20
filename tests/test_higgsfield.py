@@ -247,3 +247,16 @@ def test_auto_fallback_to_genjutsu(tmp_path: Path):
         )
         assert result.backend == "genjutsu"
         assert state["genjutsu"] == 1
+
+
+def test_download_error_raises_higgsfield_error(tmp_path: Path):
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, headers={"content-type": "text/plain"})
+
+    with HiggsfieldClient(
+        client=httpx.Client(transport=_transport(handler)),
+        env={"HF_KEY": "id:secret"},
+        sleep=lambda _: None,
+    ) as hf:
+        with pytest.raises(HiggsfieldError, match=r"download failed \(403\)"):
+            hf.download("https://cdn.example.com/missing.mp4", tmp_path / "x.mp4")

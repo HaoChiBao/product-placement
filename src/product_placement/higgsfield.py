@@ -208,8 +208,11 @@ class HiggsfieldClient:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         with self._client.stream("GET", url) as response:
             if response.status_code >= 400:
+                # Streaming responses are unread; avoid response.text (ResponseNotRead).
+                detail = response.headers.get("content-type", "")
                 raise HiggsfieldError(
-                    f"download failed ({response.status_code}): {response.text}"
+                    f"download failed ({response.status_code}) for {url}"
+                    + (f" content-type={detail}" if detail else "")
                 )
             with out_path.open("wb") as fh:
                 for chunk in response.iter_bytes():

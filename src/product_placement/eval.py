@@ -53,6 +53,14 @@ def evaluate_swap(
     edited = read_frames(Path(edited_clip))
     n = min(len(original), len(edited))
     original, edited = original[:n], edited[:n]
+    # Seedance may emit a different resolution than the source; align to original.
+    oh, ow = original[0].shape[:2]
+    aligned = []
+    for frame in edited:
+        if frame.shape[0] != oh or frame.shape[1] != ow:
+            frame = cv2.resize(frame, (ow, oh), interpolation=cv2.INTER_AREA)
+        aligned.append(frame)
+    edited = aligned
     idx = min(max(frame_index, 0), n - 1)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
