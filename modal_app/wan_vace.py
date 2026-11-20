@@ -38,10 +38,10 @@ image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("ffmpeg", "libgl1", "libglib2.0-0")
     .pip_install(
-        "torch==2.5.1",
-        "torchvision==0.20.1",
+        "torch==2.6.0",
+        "torchvision==0.21.0",
         "diffusers>=0.33.0",
-        "transformers>=4.46.0",
+        "transformers>=4.46.0,<5",
         "accelerate>=1.1.0",
         "huggingface-hub>=0.26.0",
         "safetensors",
