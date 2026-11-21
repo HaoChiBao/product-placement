@@ -98,13 +98,54 @@ export function writeJob(jobId: string, status: JobStatus): void {
   fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify(status, null, 2) + "\n")
 }
 
+function markJobFailed(jobId: string | undefined, error: string): void {
+  if (!jobId) return
+  try {
+    const cur = readJob(jobId)
+    if (!cur || cur.status === "completed" || cur.status === "failed") return
+    writeJob(jobId, {
+      ...cur,
+      status: "failed",
+      progress: "Failed",
+      error,
+      updated_at: new Date().toISOString(),
+    })
+  } catch {
+    // best-effort — UI poll timeout is the backstop
+  }
+}
+
 /** Spawn a detached Python job worker; returns immediately. */
-export function spawnJob(args: string[], opts?: { cwd?: string }): void {
-  const child = spawn(pythonBin(), args, {
-    cwd: opts?.cwd || repoRoot(),
-    env: pythonEnv(),
-    detached: true,
-    stdio: "ignore",
+export function spawnJob(
+  args: string[],
+  opts?: { cwd?: string; jobId?: string }
+): void {
+  const jobId = opts?.jobId
+  let child
+  try {
+    child = spawn(pythonBin(), args, {
+      cwd: opts?.cwd || repoRoot(),
+      env: pythonEnv(),
+      detached: true,
+      stdio: ["ignore", "ignore", "pipe"],
+    })
+  } catch (err) {
+    markJobFailed(jobId, err instanceof Error ? err.message : String(err))
+    throw err
+  }
+
+  let stderr = ""
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    stderr += chunk.toString()
+    if (stderr.length > 8000) stderr = stderr.slice(-4000)
+  })
+  child.on("error", (err) => {
+    markJobFailed(jobId, err.message)
+  })
+  child.on("exit", (code) => {
+    if (code === 0 || code === null) return
+    const detail = stderr.trim().slice(-800) || `worker exited with code ${code}`
+    markJobFailed(jobId, detail)
   })
   child.unref()
 }

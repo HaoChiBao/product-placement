@@ -12,20 +12,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from product_placement.crop_stitch import (
-    MAX_INPUT_S,
-    Region,
-    TARGET_HOLD_S,
-    build_crop_hold,
-    estimate_seedance_cost_usd,
-    extract_moment_clip,
-    mock_edit_crop,
-    probe_video,
-    stitch_edit_into_moment,
-)
-from product_placement.higgsfield import default_swap_prompt
-from product_placement.suggest import clamp_n, suggest
-
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -82,6 +68,9 @@ def run_suggest_job(
     video_path: str | Path,
     n: int = 5,
 ) -> dict[str, Any]:
+    from product_placement.crop_stitch import probe_video
+    from product_placement.suggest import clamp_n, suggest
+
     out = job_dir(job_id)
     frames = out / "frames"
     frames.mkdir(parents=True, exist_ok=True)
@@ -154,6 +143,19 @@ def run_swap_job(
     confirm: bool,
     resolution: str = "720p",
 ) -> dict[str, Any]:
+    from product_placement.crop_stitch import (
+        MAX_INPUT_S,
+        Region,
+        TARGET_HOLD_S,
+        build_crop_hold,
+        estimate_seedance_cost_usd,
+        extract_moment_clip,
+        mock_edit_crop,
+        probe_video,
+        stitch_edit_into_moment,
+    )
+    from product_placement.higgsfield import default_swap_prompt
+
     if not confirm:
         raise ValueError("confirm=true is required before a paid (or mock) swap")
     if resolution != "720p":
@@ -291,24 +293,39 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.command == "suggest":
-        run_suggest_job(args.job_id, video_path=args.video, n=args.n)
-        return
-    if args.command == "swap":
-        region = json.loads(args.region_json)
-        run_swap_job(
-            args.job_id,
-            video_path=args.video,
-            product_path=args.product,
-            start_s=args.start,
-            end_s=args.end,
-            region=region,
-            target=args.target,
-            confirm=bool(args.confirm),
-            resolution=args.resolution,
-        )
-        return
-    raise SystemExit(f"unknown command {args.command}")
+    job_id = getattr(args, "job_id", None)
+    try:
+        if args.command == "suggest":
+            run_suggest_job(args.job_id, video_path=args.video, n=args.n)
+            return
+        if args.command == "swap":
+            region = json.loads(args.region_json)
+            run_swap_job(
+                args.job_id,
+                video_path=args.video,
+                product_path=args.product,
+                start_s=args.start,
+                end_s=args.end,
+                region=region,
+                target=args.target,
+                confirm=bool(args.confirm),
+                resolution=args.resolution,
+            )
+            return
+        raise SystemExit(f"unknown command {args.command}")
+    except Exception as exc:
+        if job_id:
+            try:
+                write_status(
+                    job_id,
+                    status="failed",
+                    progress="Failed",
+                    error=str(exc),
+                    traceback=traceback.format_exc()[-4000:],
+                )
+            except Exception:
+                pass
+        raise
 
 
 if __name__ == "__main__":

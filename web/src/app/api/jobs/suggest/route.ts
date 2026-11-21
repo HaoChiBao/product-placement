@@ -76,17 +76,20 @@ export async function POST(req: NextRequest) {
     }
     writeJob(jobId, status)
 
-    spawnJob([
-      "-m",
-      "product_placement.jobs",
-      "suggest",
-      "--job-id",
-      jobId,
-      "--video",
-      videoPath,
-      "-n",
-      String(n),
-    ])
+    spawnJob(
+      [
+        "-m",
+        "product_placement.jobs",
+        "suggest",
+        "--job-id",
+        jobId,
+        "--video",
+        videoPath,
+        "-n",
+        String(n),
+      ],
+      { jobId }
+    )
 
     return NextResponse.json({ jobId, ...status })
   } catch (err) {

@@ -147,10 +147,12 @@ def build_crop_hold(
     if not frames:
         raise RuntimeError(f"no frames in {moment_clip}")
 
-    target_n = max(len(frames), int(round(hold_s * fps)))
-    # Stay strictly under 5.0s of wall time at this fps.
+    # Stay strictly under 5.0s so Higgsfield ceil() does not bill a 6th second.
     max_n = max(1, int(math_floor_under(5.0, fps)))
-    target_n = min(target_n, max_n)
+    desired = max(1, int(round(float(hold_s) * fps)))
+    target_n = min(desired, max_n)
+    if len(frames) > target_n:
+        frames = frames[:target_n]
     while len(frames) < target_n:
         frames.append(frames[-1].copy())
 

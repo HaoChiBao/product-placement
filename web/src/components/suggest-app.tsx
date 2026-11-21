@@ -26,12 +26,25 @@ type SwapResult = {
   target?: string
 }
 
-async function pollJob(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
+async function pollJob(
+  jobId: string,
+  opts?: {
+    signal?: AbortSignal
+    onProgress?: (text: string) => void
+    timeoutMs?: number
+  }
+): Promise<JobStatus> {
+  const timeoutMs = opts?.timeoutMs ?? 20 * 60 * 1000
+  const t0 = Date.now()
   for (;;) {
-    if (signal?.aborted) throw new Error("aborted")
-    const res = await fetch(`/api/jobs/${jobId}`, { signal })
+    if (opts?.signal?.aborted) throw new Error("aborted")
+    if (Date.now() - t0 > timeoutMs) {
+      throw new Error(`job timed out after ${Math.round(timeoutMs / 1000)}s`)
+    }
+    const res = await fetch(`/api/jobs/${jobId}`, { signal: opts?.signal })
     const data = (await res.json()) as JobStatus & { error?: string }
     if (!res.ok) throw new Error(data.error || res.statusText)
+    opts?.onProgress?.(data.progress || data.status)
     if (data.status === "completed" || data.status === "failed") return data
     await new Promise((r) => setTimeout(r, 1200))
   }
@@ -106,23 +119,14 @@ export function SuggestApp() {
       const jobId = data.jobId as string
       setProgress(data.progress || "Queued")
 
-      // Light poll loop with progress updates
-      let job: JobStatus | null = null
-      for (;;) {
-        if (ac.signal.aborted) throw new Error("aborted")
-        const st = await fetch(`/api/jobs/${jobId}`, { signal: ac.signal })
-        const body = (await st.json()) as JobStatus & { error?: string; result?: SuggestRun }
-        if (!st.ok) throw new Error(body.error || st.statusText)
-        setProgress(body.progress || body.status)
-        if (body.status === "failed") throw new Error(body.error || "suggest failed")
-        if (body.status === "completed") {
-          job = body
-          break
-        }
-        await new Promise((r) => setTimeout(r, 1200))
-      }
+      const job = await pollJob(jobId, {
+        signal: ac.signal,
+        onProgress: (text) => setProgress(text),
+        timeoutMs: 15 * 60 * 1000,
+      })
+      if (job.status === "failed") throw new Error(job.error || "suggest failed")
 
-      const result = (job?.result || null) as SuggestRun | null
+      const result = (job.result || null) as SuggestRun | null
       if (!result?.moments) throw new Error("suggest returned no moments")
       setRun(result)
       setSelected(0)
@@ -180,7 +184,11 @@ export function SuggestApp() {
           : `Swap queued · est. $${Number(data.estimated_cost_usd).toFixed(2)}`
       )
 
-      const job = await pollJob(jobId, ac.signal)
+      const job = await pollJob(jobId, {
+        signal: ac.signal,
+        onProgress: (text) => setSwapProgress(text),
+        timeoutMs: 25 * 60 * 1000,
+      })
       if (job.status === "failed") throw new Error(job.error || "swap failed")
       const result = job.result as SwapResult | undefined
       if (!result?.result_url) throw new Error("swap completed without result video")

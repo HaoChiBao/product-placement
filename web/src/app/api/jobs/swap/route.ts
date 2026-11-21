@@ -109,28 +109,31 @@ export async function POST(req: NextRequest) {
     }
     writeJob(jobId, status)
 
-    spawnJob([
-      "-m",
-      "product_placement.jobs",
-      "swap",
-      "--job-id",
-      jobId,
-      "--video",
-      video,
-      "--product",
-      productPath,
-      "--start",
-      String(moment.start_s),
-      "--end",
-      String(moment.end_s),
-      "--region-json",
-      JSON.stringify(region),
-      "--target",
-      swapTarget,
-      "--confirm",
-      "--resolution",
-      "720p",
-    ])
+    spawnJob(
+      [
+        "-m",
+        "product_placement.jobs",
+        "swap",
+        "--job-id",
+        jobId,
+        "--video",
+        video,
+        "--product",
+        productPath,
+        "--start",
+        String(moment.start_s),
+        "--end",
+        String(moment.end_s),
+        "--region-json",
+        JSON.stringify(region),
+        "--target",
+        swapTarget,
+        "--confirm",
+        "--resolution",
+        "720p",
+      ],
+      { jobId }
+    )
 
     return NextResponse.json({ jobId, estimated_cost_usd: estimated, ...status })
   } catch (err) {

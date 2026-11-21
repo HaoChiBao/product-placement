@@ -66,7 +66,8 @@ def _write_tiny_mp4(path: Path, *, n_frames: int = 24, fps: float = 24.0) -> Pat
 
 
 def test_crop_hold_stays_under_five_seconds(tmp_path: Path):
-    clip = _write_tiny_mp4(tmp_path / "src.mp4", n_frames=36)
+    # Longer than 5s at 24fps so truncation (not just pad) is required.
+    clip = _write_tiny_mp4(tmp_path / "src.mp4", n_frames=144)
     region = Region(80, 40, 120, 100)
     hold = build_crop_hold(clip, region, tmp_path / "hold.mp4", hold_s=4.96)
     assert hold.is_file()
@@ -88,6 +89,7 @@ def test_crop_hold_stays_under_five_seconds(tmp_path: Path):
     )
     duration = float(json.loads(raw)["format"]["duration"])
     assert duration < MAX_INPUT_S
+    assert duration <= 4.96 + 1e-2
 
 
 def test_mock_edit_and_stitch(tmp_path: Path):
