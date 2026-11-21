@@ -1,7 +1,8 @@
 """Generative product placement via pluggable video-edit backends."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from product_placement.pipeline import swap
+from product_placement.suggest import Moment, suggest
 
-__all__ = ["swap", "__version__"]
+__all__ = ["swap", "suggest", "Moment", "__version__"]

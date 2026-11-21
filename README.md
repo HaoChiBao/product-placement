@@ -1,6 +1,45 @@
 # product-placement
 
-`swap(clip, target, product_image) -> new_clip` using a pluggable generative video-edit backend. Design notes for collaborators: [docs/DESIGN.md](docs/DESIGN.md).
+Find moments in a full video where a product can sit, then `swap(clip, target, product_image) -> new_clip` with a pluggable generative backend. Design notes: [docs/DESIGN.md](docs/DESIGN.md).
+
+Based on the generative-swap work (`haochibao/generative-swap-760a` / PR #2).
+
+## Web UI
+
+Minimal Next.js page (Cult UI / shadcn components) that uploads or points at a video, runs `suggest()`, and lets you scrub each 5 s pick.
+
+```bash
+# from repo root, with the Python package + venv already installed
+cd web && npm install && npm run dev
+```
+
+Open http://localhost:3000. API routes shell out to `python -m product_placement suggest` and ffmpeg for clips. No auth or DB.
+
+## Suggest (pre-swap)
+
+`suggest(video_path, n=5) -> list[Moment]` ranks 3–5 spread-out ~5 s windows that are stable, long enough to bill/edit, and have a face-free placement region (table / prop / similar) ready for the crop-and-stitch swap path.
+
+Method (all local, no API key):
+
+1. Shot cuts from HSV histogram correlation
+2. Keep long shots; take ~5 s windows
+3. Drop shaky windows (camera translation from an affine fit — actor motion is ignored)
+4. YuNet faces + YOLOX-S (COCO) props/surfaces
+5. Prefer replaceable props (wine glass, bottle, cup, …), else a face-free patch on a surface, else a large clear lower-frame box
+6. Greedy score + time/shot spread; write a contact sheet
+
+```bash
+python -m product_placement suggest \
+  --video path/to/film.mp4 \
+  -n 5 \
+  --out-dir runs/suggest
+```
+
+Writes `moments.json`, `contact_sheet.jpg`, and `frames/moment_XX.jpg`. Each moment has `start_s` / `end_s`, `region` `{x,y,w,h}` in source pixels, `whats_there`, `score`, and `reason`.
+
+ONNX weights download on first run into `checkpoints/` (if present) or `~/.cache/product-placement/models/` (OpenCV Zoo YuNet + YOLOX-S). No paid key.
+
+## Swap
 
 ```bash
 python -m product_placement swap \
@@ -66,12 +105,14 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
-`ffmpeg` is required (Genjutsu prep + audio mux).
+`ffmpeg` is required (Genjutsu prep + audio mux). Suggest needs OpenCV + NumPy (in `requirements.txt`).
 
 ## Sample assets
 
 - `assets/samples/hand_held_cup.mp4` — Pexels [#6204700](https://www.pexels.com/video/person-holding-a-cup-of-hot-coffee-6204700/) (Pexels License)
 - `assets/samples/soda_can.png` — self-made PNG with alpha
+
+For a freely licensed full-film smoke test, download Blender’s *Tears of Steel* (CC-BY) at runtime, e.g. `https://download.blender.org/demo/movies/ToS/tears_of_steel_720p.mov` — do not commit it.
 
 ## Optional eval
 
@@ -83,19 +124,22 @@ pip install -e .
 pytest -q
 ```
 
-Mocked HTTP / Modal client routing only; CI does not call live APIs or deploy Modal.
+Suggest unit tests are pure logic (spread, face clearance, `n`); swap tests mock HTTP / Modal. No network or GPU required for `pytest`.
 
 ## Package
 
 ```
 src/product_placement/
+  suggest.py      # suggest(video) -> moments + contact sheet
+  vision.py       # shots, YuNet faces, YOLOX props, motion
+  models_store.py # ONNX download/cache
   backends.py     # seedance / wan27 / wan-vace / wan-vace-modal
-  audio.py        # mux original audio
+  audio.py
   higgsfield.py
   prepare.py
   pipeline.py
   cli.py
   eval.py
 modal_app/
-  wan_vace.py     # Modal deploy target
+  wan_vace.py
 ```

@@ -1,0 +1,41 @@
+{
+  "video": "assets/samples/hand_held_cup.mp4",
+  "elapsed_s": 1.1,
+  "cost_usd": 0.0,
+  "n": 2,
+  "moments": [
+    {
+      "start_s": 0.0,
+      "end_s": 5.0,
+      "frame": "artifacts/suggest/hand_held_cup/frames/moment_01.jpg",
+      "frame_w": 360,
+      "frame_h": 640,
+      "region": {
+        "x": 88,
+        "y": 231,
+        "w": 248,
+        "h": 276
+      },
+      "whats_there": "cup",
+      "score": 0.8174,
+      "reason": "Stable 5s window; cup (det 0.80, cam 21.0px, faces 0)"
+    },
+    {
+      "start_s": 4.75,
+      "end_s": 9.75,
+      "frame": "artifacts/suggest/hand_held_cup/frames/moment_02.jpg",
+      "frame_w": 360,
+      "frame_h": 640,
+      "region": {
+        "x": 74,
+        "y": 244,
+        "w": 244,
+        "h": 272
+      },
+      "whats_there": "cup",
+      "score": 0.7876,
+      "reason": "Stable 5s window; cup (det 0.69, cam 12.0px, faces 0)"
+    }
+  ],
+  "contact_sheet": "artifacts/suggest/hand_held_cup/contact_sheet.jpg"
+}

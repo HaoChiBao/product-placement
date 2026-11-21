@@ -227,3 +227,8 @@ checkpoints/
 third_party/
 .venv/
 out.mp4
+web/node_modules/
+web/.next/
+web/.runs/
+*.mov
+suit_clip*.mp4
