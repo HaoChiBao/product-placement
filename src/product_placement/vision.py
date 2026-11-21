@@ -251,7 +251,12 @@ def camera_motion_px(
 ) -> float:
     """Camera translation (px/step) from border features. Flat backdrops → 0 (don't reject)."""
     fps = float(video.get(cv2.CAP_PROP_FPS) or 24.0)
-    times = np.linspace(start_s, end_s, samples + 1)
+    # Stay inside the window so a sample never lands on the next shot's first frame.
+    pad = min(0.12, max(0.0, (end_s - start_s) * 0.08))
+    lo, hi = start_s + pad, end_s - pad
+    if hi <= lo:
+        lo, hi = start_s, end_s
+    times = np.linspace(lo, hi, samples + 1)
     mags: list[float] = []
     prev_gray = None
     for t in times:
@@ -397,6 +402,20 @@ class YoloX:
         return out
 
 
+def _plural_label(label: str) -> str:
+    irregular = {
+        "wine glass": "wine glasses",
+        "glass": "glasses",
+        "person": "people",
+        "knife": "knives",
+    }
+    if label in irregular:
+        return irregular[label]
+    if label.endswith("s"):
+        return label
+    return label + "s"
+
+
 def region_avoids_faces(region: BBox, faces: list[BBox], *, max_iou: float = 0.02) -> bool:
     return all(region.iou(f) <= max_iou for f in faces)
 
@@ -471,7 +490,7 @@ def choose_placement(
             # Only merge nearby same-class props; skip room-wide unions.
             if union.area <= 0.2 * frame_area and union.area <= 4 * best.box.area:
                 region = union
-                label = f"{best.label}s"
+                label = _plural_label(best.label)
         if not region_avoids_faces(region, faces):
             region = best.box.pad(12, frame_w, frame_h)
             label = best.label

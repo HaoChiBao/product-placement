@@ -21,6 +21,8 @@ from product_placement.vision import (
 )
 
 WINDOW_S = 5.0
+# Prefer ~5 s (edit/bill window), but keep short shots that still have a placeable prop.
+MIN_WINDOW_S = 2.0
 # Border-feature affine translation per sample step. Allows mild handheld / slow moves;
 # whip-pans (often 200px+) still drop out.
 MAX_CAM_MOTION = 100.0
@@ -96,11 +98,20 @@ def pick_spread(candidates: list[_Cand], n: int, *, min_gap_s: float) -> list[_C
     return picked[:n]
 
 
-def _candidate_windows(shots, duration_s: float, window_s: float) -> list[tuple[int, float, float]]:
-    """(shot_index, start_s, end_s) mid-shot 5s windows, spaced inside long shots."""
+def _candidate_windows(
+    shots,
+    duration_s: float,
+    window_s: float = WINDOW_S,
+    min_window_s: float = MIN_WINDOW_S,
+) -> list[tuple[int, float, float]]:
+    """(shot_index, start_s, end_s). Prefer ~window_s; use full short shots down to min_window_s."""
     out: list[tuple[int, float, float]] = []
     for i, shot in enumerate(shots):
+        if shot.duration_s + 1e-6 < min_window_s:
+            continue
         if shot.duration_s + 1e-6 < window_s:
+            # Short but usable shot — keep the whole thing (swap can pad/hold later).
+            out.append((i, shot.start_s, shot.end_s))
             continue
         if shot.duration_s < window_s + 2.0:
             start = shot.start_s + max(0.0, (shot.duration_s - window_s) / 2.0)
@@ -118,9 +129,8 @@ def _candidate_windows(shots, duration_s: float, window_s: float) -> list[tuple[
                 if end_start >= shot.start_s:
                     out.append((i, end_start, shot.end_s))
                 break
-    # Also cover very short videos: one window from 0 if possible.
-    if not out and duration_s >= window_s:
-        out.append((0, 0.0, window_s))
+    if not out and duration_s >= min_window_s:
+        out.append((0, 0.0, min(window_s, duration_s)))
     return out
 
 
@@ -172,9 +182,16 @@ def _score_window(
 
     stability = max(0.0, 1.0 - cam / MAX_CAM_MOTION)
     face_penalty = min(1.0, len(face_boxes) * 0.08)
-    score = 0.55 * det_score + 0.35 * stability + 0.10 * (1.0 - face_penalty)
+    dur = end_s - start_s
+    # Mild preference for full edit-length windows without discarding short props.
+    length_factor = 1.0 if dur + 1e-6 >= WINDOW_S else 0.85 + 0.15 * (dur / WINDOW_S)
+    score = (0.55 * det_score + 0.35 * stability + 0.10 * (1.0 - face_penalty)) * length_factor
+    if dur + 1e-6 >= WINDOW_S:
+        length_note = f"Stable {dur:.0f}s window"
+    else:
+        length_note = f"Short {dur:.1f}s shot (below {WINDOW_S:.0f}s edit window)"
     reason = (
-        f"Stable {end_s - start_s:.0f}s window; {whats} "
+        f"{length_note}; {whats} "
         f"(det {det_score:.2f}, cam {cam:.1f}px, faces {len(face_boxes)})"
     )
     return _Cand(
@@ -267,9 +284,9 @@ def suggest(
     fps = float(video.get(cv2.CAP_PROP_FPS) or 24.0)
     n_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     duration = n_frames / fps if fps else 0.0
-    if duration + 1e-6 < window_s:
+    if duration + 1e-6 < MIN_WINDOW_S:
         video.release()
-        raise ValueError(f"video is {duration:.2f}s; need at least {window_s}s")
+        raise ValueError(f"video is {duration:.2f}s; need at least {MIN_WINDOW_S}s")
 
     shots = detect_shots(video)
     windows = _candidate_windows(shots, duration, window_s)
@@ -325,10 +342,11 @@ def suggest(
             "no placement moments found (need stable, face-clear windows with a surface/prop)"
         )
 
-    min_gap = max(window_s * 0.75, duration / max(n * 2.5, 1))
+    # Gap is on start times; keep it small enough that adjacent short shots can both survive.
+    min_gap = max(MIN_WINDOW_S, duration / max(n * 2.5, 1))
     chosen = pick_spread(cands, n, min_gap_s=min_gap)
     if len(chosen) < min(n, len(cands)):
-        chosen = pick_spread(cands, min(n, len(cands)), min_gap_s=window_s * 0.5)
+        chosen = pick_spread(cands, min(n, len(cands)), min_gap_s=MIN_WINDOW_S * 0.5)
 
     moments: list[Moment] = []
     sheet_frames: list[np.ndarray] = []

@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import numpy as np
 
-from product_placement.suggest import _Cand, clamp_n, pick_spread
-from product_placement.vision import BBox, region_avoids_faces, largest_face_free_region, choose_placement
-from product_placement.vision import Detection
+from product_placement.suggest import MIN_WINDOW_S, WINDOW_S, _Cand, _candidate_windows, clamp_n, pick_spread
+from product_placement.vision import (
+    BBox,
+    Detection,
+    Shot,
+    choose_placement,
+    largest_face_free_region,
+    region_avoids_faces,
+    _plural_label,
+)
 
 
 def _cand(start: float, score: float, shot: int = 0) -> _Cand:
@@ -86,3 +93,21 @@ def test_choose_placement_prefers_wine_glass_away_from_face():
     assert "wine glass" in label
     assert score >= 0.9
     assert region_avoids_faces(region, faces)
+
+
+def test_candidate_windows_keeps_short_shots():
+    shots = [
+        Shot(0.0, 2.0),
+        Shot(2.0, 4.0),
+        Shot(4.0, 10.0),
+    ]
+    wins = _candidate_windows(shots, 10.0, WINDOW_S, MIN_WINDOW_S)
+    # Short table shots become full-shot windows; long shot gets a 5s window.
+    assert (0, 0.0, 2.0) in wins
+    assert (1, 2.0, 4.0) in wins
+    assert any(si == 2 and end - start >= WINDOW_S - 1e-6 for si, start, end in wins)
+
+
+def test_plural_wine_glasses():
+    assert _plural_label("wine glass") == "wine glasses"
+    assert _plural_label("cup") == "cups"

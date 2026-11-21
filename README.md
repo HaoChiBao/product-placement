@@ -22,10 +22,10 @@ Open http://localhost:3000. API routes shell out to `python -m product_placement
 Method (all local, no API key):
 
 1. Shot cuts from HSV histogram correlation
-2. Keep long shots; take ~5 s windows
+2. Prefer ~5 s windows inside long shots; keep whole shots down to ~2 s when that’s all there is (swap can pad/hold)
 3. Drop shaky windows (camera translation from an affine fit — actor motion is ignored)
 4. YuNet faces + YOLOX-S (COCO) props/surfaces
-5. Prefer replaceable props (wine glass, bottle, cup, …), else a face-free patch on a surface, else a large clear lower-frame box
+5. Prefer replaceable props (wine glass, bottle, cup, …), else a face-free patch on a surface
 6. Greedy score + time/shot spread; write a contact sheet
 
 ```bash
