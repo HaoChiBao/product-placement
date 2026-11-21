@@ -8,7 +8,6 @@ import time
 
 from product_placement.backends import MODELS
 from product_placement.pipeline import swap
-from product_placement.suggest import clamp_n, suggest
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -88,6 +87,9 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     if args.command == "suggest":
+        # Lazy: suggest pulls optional OpenCV / numpy.
+        from product_placement.suggest import clamp_n, suggest
+
         t0 = time.perf_counter()
         moments = suggest(
             video_path=args.video,

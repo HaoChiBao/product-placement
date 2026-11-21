@@ -36,16 +36,30 @@ export function MomentCard({
   const videoRef = useRef<HTMLVideoElement>(null)
   const [playing, setPlaying] = useState(false)
 
-  const box = useMemo(() => {
-    const w = moment.frame_w || 1
-    const h = moment.frame_h || 1
-    return {
-      left: `${(moment.region.x / w) * 100}%`,
-      top: `${(moment.region.y / h) * 100}%`,
-      width: `${(moment.region.w / w) * 100}%`,
-      height: `${(moment.region.h / h) * 100}%`,
+  const frameW = moment.frame_w || 16
+  const frameH = moment.frame_h || 9
+  const frameAR = frameW / frameH
+  const containerAR = 16 / 9
+
+  // Position the box in frame pixels, then place the frame inside a letterboxed
+  // wrapper so object-contain padding does not shift the overlay.
+  const box = useMemo(
+    () => ({
+      left: `${(moment.region.x / frameW) * 100}%`,
+      top: `${(moment.region.y / frameH) * 100}%`,
+      width: `${(moment.region.w / frameW) * 100}%`,
+      height: `${(moment.region.h / frameH) * 100}%`,
+    }),
+    [moment.region, frameW, frameH]
+  )
+
+  const mediaStyle = useMemo(() => {
+    // Match CSS object-contain: fill one axis, shrink the other.
+    if (frameAR > containerAR) {
+      return { width: "100%", height: "auto", aspectRatio: `${frameW} / ${frameH}` }
     }
-  }, [moment])
+    return { height: "100%", width: "auto", aspectRatio: `${frameW} / ${frameH}` }
+  }, [frameAR, frameW, frameH])
 
   async function togglePlay() {
     onSelect()
@@ -71,16 +85,18 @@ export function MomentCard({
       }`}
     >
       <button type="button" className="w-full text-left" onClick={onSelect}>
-        <div className="relative aspect-video w-full overflow-hidden bg-neutral-900">
-          <img
-            src={moment.frameUrl}
-            alt={`Moment ${index + 1} frame`}
-            className="h-full w-full object-contain"
-          />
-          <div
-            className="pointer-events-none absolute border-2 border-[var(--place)] shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
-            style={box}
-          />
+        <div className="relative flex aspect-video w-full items-center justify-center overflow-hidden bg-neutral-900">
+          <div className="relative max-h-full max-w-full" style={mediaStyle}>
+            <img
+              src={moment.frameUrl}
+              alt={`Moment ${index + 1} frame`}
+              className="h-full w-full object-fill"
+            />
+            <div
+              className="pointer-events-none absolute border-2 border-[var(--place)] shadow-[0_0_0_1px_rgba(0,0,0,0.35)]"
+              style={box}
+            />
+          </div>
           <div className="absolute left-3 top-3 flex gap-2">
             <HaloBadge variant="secondary">{`#${index + 1}`}</HaloBadge>
             <HaloBadge variant="default">{moment.score.toFixed(2)}</HaloBadge>
