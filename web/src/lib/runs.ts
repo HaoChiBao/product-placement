@@ -142,9 +142,15 @@ export function spawnJob(
   child.on("error", (err) => {
     markJobFailed(jobId, err.message)
   })
-  child.on("exit", (code) => {
-    if (code === 0 || code === null) return
-    const detail = stderr.trim().slice(-800) || `worker exited with code ${code}`
+  child.on("exit", (code, signal) => {
+    // Normal success: code 0. Signal kills (OOM/SIGTERM/SIGSEGV) report code=null.
+    if (code === 0) return
+    if (code === null && !signal) return
+    const detail =
+      stderr.trim().slice(-800) ||
+      (signal
+        ? `worker killed by signal ${signal}`
+        : `worker exited with code ${code}`)
     markJobFailed(jobId, detail)
   })
   child.unref()
