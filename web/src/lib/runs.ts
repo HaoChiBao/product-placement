@@ -1,47 +1,36 @@
 import { randomUUID } from "crypto"
 import fs from "fs"
 import path from "path"
+import { spawn } from "child_process"
 
-export type Region = { x: number; y: number; w: number; h: number }
+import type { JobStatus, SuggestRun } from "@/lib/types"
 
-export type Moment = {
-  start_s: number
-  end_s: number
-  frame: string
-  frame_w: number
-  frame_h: number
-  region: Region
-  whats_there: string
-  score: number
-  reason: string
-  frameUrl?: string
-  clipUrl?: string
-}
-
-export type SuggestRun = {
-  runId: string
-  video: string
-  n: number
-  window_s: number
-  duration_s: number
-  elapsed_s?: number
-  moments: Moment[]
-  contact_sheet?: string
-}
+export type { JobStatus, Moment, Region, SuggestRun } from "@/lib/types"
+export { SEEDANCE_USD_PER_S, MAX_SWAP_INPUT_S, estimateSwapCostUsd } from "@/lib/types"
 
 export function repoRoot(): string {
-  // web/ is one level under the repo root
+  const env = (process.env.REPO_ROOT || "").trim()
+  if (env) return path.resolve(env)
+  // web/ is one level under the repo root in local/dev; Docker sets REPO_ROOT=/app
   return path.resolve(process.cwd(), "..")
 }
 
+export function dataRoot(): string {
+  const env = (process.env.DATA_DIR || "").trim()
+  const root = env ? path.resolve(env) : path.join(repoRoot(), "runs", "ui")
+  fs.mkdirSync(root, { recursive: true })
+  return root
+}
+
 export function runsRoot(): string {
-  const root = path.join(repoRoot(), "runs", "ui")
+  // Suggest runs live under DATA_DIR/jobs (same as swap jobs).
+  const root = path.join(dataRoot(), "jobs")
   fs.mkdirSync(root, { recursive: true })
   return root
 }
 
 export function newRunId(): string {
-  return randomUUID().slice(0, 8)
+  return randomUUID().slice(0, 12)
 }
 
 export function runDir(runId: string): string {
@@ -49,16 +38,36 @@ export function runDir(runId: string): string {
 }
 
 export function pythonBin(): string {
+  const env = (process.env.PYTHON_BIN || "").trim()
+  if (env) return env
+  // Prefer system/interpreter on PATH — do not require the repo .venv.
   const venv = path.join(repoRoot(), ".venv", "bin", "python")
-  if (fs.existsSync(venv)) return venv
+  if (process.env.NODE_ENV !== "production" && fs.existsSync(venv)) return venv
   return "python3"
+}
+
+export function pythonEnv(): NodeJS.ProcessEnv {
+  const src = path.join(repoRoot(), "src")
+  const existing = process.env.PYTHONPATH || ""
+  const pythonpath = existing ? `${src}${path.delimiter}${existing}` : src
+  return {
+    ...process.env,
+    PYTHONPATH: pythonpath,
+    DATA_DIR: dataRoot(),
+    MODEL_CACHE_DIR:
+      process.env.MODEL_CACHE_DIR ||
+      (fs.existsSync("/app/models")
+        ? "/app/models"
+        : path.join(repoRoot(), "checkpoints")),
+  }
 }
 
 export function withUrls(run: SuggestRun): SuggestRun {
   return {
     ...run,
     moments: run.moments.map((m, i) => {
-      const name = path.basename(m.frame) || `moment_${String(i + 1).padStart(2, "0")}.jpg`
+      const name =
+        path.basename(m.frame) || `moment_${String(i + 1).padStart(2, "0")}.jpg`
       return {
         ...m,
         frameUrl: `/api/runs/${run.runId}/frame/${encodeURIComponent(name)}`,
@@ -75,4 +84,27 @@ export function readRun(runId: string): SuggestRun | null {
     runId?: string
   }
   return withUrls({ ...raw, runId })
+}
+
+export function readJob(jobId: string): JobStatus | null {
+  const p = path.join(runDir(jobId), "status.json")
+  if (!fs.existsSync(p)) return null
+  return JSON.parse(fs.readFileSync(p, "utf8")) as JobStatus
+}
+
+export function writeJob(jobId: string, status: JobStatus): void {
+  const dir = runDir(jobId)
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, "status.json"), JSON.stringify(status, null, 2) + "\n")
+}
+
+/** Spawn a detached Python job worker; returns immediately. */
+export function spawnJob(args: string[], opts?: { cwd?: string }): void {
+  const child = spawn(pythonBin(), args, {
+    cwd: opts?.cwd || repoRoot(),
+    env: pythonEnv(),
+    detached: true,
+    stdio: "ignore",
+  })
+  child.unref()
 }

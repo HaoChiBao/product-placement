@@ -19,6 +19,15 @@ YOLOX_NAME = "object_detection_yolox_2022nov.onnx"
 
 
 def default_cache_dir() -> Path:
+    import os
+
+    env = (os.environ.get("MODEL_CACHE_DIR") or "").strip()
+    if env:
+        return Path(env)
+    # Docker / Railway image bakes weights here at build time.
+    baked = Path("/app/models")
+    if baked.is_dir():
+        return baked
     return Path.home() / ".cache" / "product-placement" / "models"
 
 

@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { MomentCard } from "@/components/moment-card"
 import { HaloButton } from "@/components/ui/halo-button"
@@ -8,40 +8,129 @@ import { HaloDropzone } from "@/components/ui/halo-dropzone"
 import { HaloField, HaloFieldDescription, HaloFieldLabel } from "@/components/ui/halo-field"
 import { HaloInput } from "@/components/ui/halo-input"
 import { HaloProgress } from "@/components/ui/halo-progress"
-import type { SuggestRun } from "@/lib/runs"
+import {
+  estimateSwapCostUsd,
+  type JobStatus,
+  type SuggestRun,
+} from "@/lib/types"
+
+type SwapResult = {
+  original_url: string
+  result_url: string
+  download_url: string
+  estimated_cost_usd: number
+  billed_duration_s?: number
+  elapsed_s?: number
+  backend?: string
+  mock?: boolean
+  target?: string
+}
+
+async function pollJob(jobId: string, signal?: AbortSignal): Promise<JobStatus> {
+  for (;;) {
+    if (signal?.aborted) throw new Error("aborted")
+    const res = await fetch(`/api/jobs/${jobId}`, { signal })
+    const data = (await res.json()) as JobStatus & { error?: string }
+    if (!res.ok) throw new Error(data.error || res.statusText)
+    if (data.status === "completed" || data.status === "failed") return data
+    await new Promise((r) => setTimeout(r, 1200))
+  }
+}
 
 export function SuggestApp() {
   const [file, setFile] = useState<File | null>(null)
   const [path, setPath] = useState("")
   const [n, setN] = useState(5)
   const [loading, setLoading] = useState(false)
+  const [progress, setProgress] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [run, setRun] = useState<SuggestRun | null>(null)
   const [selected, setSelected] = useState(0)
+
+  const [productFile, setProductFile] = useState<File | null>(null)
+  const [productPath, setProductPath] = useState("assets/samples/soda_can.png")
+  const [target, setTarget] = useState("")
+  const [confirmCost, setConfirmCost] = useState(false)
+  const [swapping, setSwapping] = useState(false)
+  const [swapProgress, setSwapProgress] = useState<string | null>(null)
+  const [swapResult, setSwapResult] = useState<SwapResult | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const selectedMoment = run?.moments[selected] ?? null
+  const estimatedCost = useMemo(() => {
+    if (!selectedMoment) return estimateSwapCostUsd(4.96)
+    const dur = Math.min(4.96, Math.max(selectedMoment.end_s - selectedMoment.start_s, 2))
+    return estimateSwapCostUsd(dur)
+  }, [selectedMoment])
+
+  useEffect(() => {
+    if (selectedMoment) {
+      setTarget(selectedMoment.whats_there || "")
+      setConfirmCost(false)
+      setSwapResult(null)
+    }
+  }, [selectedMoment])
 
   const onFiles = useCallback((files: File[]) => {
     setFile(files[0] ?? null)
     setError(null)
   }, [])
 
-  async function runSuggest() {
+  const onProductFiles = useCallback((files: File[]) => {
+    setProductFile(files[0] ?? null)
+    setError(null)
+  }, [])
+
+  async function runSuggest(opts?: { path?: string; n?: number; file?: File | null }) {
+    abortRef.current?.abort()
+    const ac = new AbortController()
+    abortRef.current = ac
     setLoading(true)
     setError(null)
     setRun(null)
+    setSwapResult(null)
+    setProgress("Starting suggest job…")
     try {
       const form = new FormData()
-      form.set("n", String(n))
-      if (path.trim()) form.set("path", path.trim())
-      else if (file) form.set("file", file)
+      const nn = opts?.n ?? n
+      form.set("n", String(nn))
+      const p = (opts?.path ?? path).trim()
+      const f = opts?.file !== undefined ? opts.file : file
+      if (p) form.set("path", p)
+      else if (f) form.set("file", f)
       else throw new Error("Drop a video or enter a server path")
 
-      const res = await fetch("/api/suggest", { method: "POST", body: form })
+      const res = await fetch("/api/jobs/suggest", { method: "POST", body: form })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || res.statusText)
-      setRun(data as SuggestRun)
+      const jobId = data.jobId as string
+      setProgress(data.progress || "Queued")
+
+      // Light poll loop with progress updates
+      let job: JobStatus | null = null
+      for (;;) {
+        if (ac.signal.aborted) throw new Error("aborted")
+        const st = await fetch(`/api/jobs/${jobId}`, { signal: ac.signal })
+        const body = (await st.json()) as JobStatus & { error?: string; result?: SuggestRun }
+        if (!st.ok) throw new Error(body.error || st.statusText)
+        setProgress(body.progress || body.status)
+        if (body.status === "failed") throw new Error(body.error || "suggest failed")
+        if (body.status === "completed") {
+          job = body
+          break
+        }
+        await new Promise((r) => setTimeout(r, 1200))
+      }
+
+      const result = (job?.result || null) as SuggestRun | null
+      if (!result?.moments) throw new Error("suggest returned no moments")
+      setRun(result)
       setSelected(0)
+      setProgress(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      if ((e as Error).message !== "aborted") {
+        setError(e instanceof Error ? e.message : String(e))
+      }
     } finally {
       setLoading(false)
     }
@@ -50,23 +139,61 @@ export function SuggestApp() {
   async function loadDemo() {
     setPath("assets/samples/hand_held_cup.mp4")
     setFile(null)
-    setLoading(true)
+    setN(3)
+    await runSuggest({ path: "assets/samples/hand_held_cup.mp4", n: 3, file: null })
+  }
+
+  async function runSwap() {
+    if (!run || !selectedMoment) return
+    if (!confirmCost) {
+      setError("Confirm the estimated Seedance cost before running a swap.")
+      return
+    }
+    if (!productFile && !productPath.trim()) {
+      setError("Upload a product image or pick the sample path.")
+      return
+    }
+
+    abortRef.current?.abort()
+    const ac = new AbortController()
+    abortRef.current = ac
+    setSwapping(true)
     setError(null)
-    setRun(null)
+    setSwapResult(null)
+    setSwapProgress("Starting swap job…")
     try {
       const form = new FormData()
-      form.set("n", "3")
-      form.set("path", "assets/samples/hand_held_cup.mp4")
-      const res = await fetch("/api/suggest", { method: "POST", body: form })
+      form.set("runId", run.runId)
+      form.set("momentIndex", String(selected))
+      form.set("target", target || selectedMoment.whats_there)
+      form.set("confirm", "true")
+      if (productFile) form.set("product", productFile)
+      else form.set("productPath", productPath.trim())
+
+      const res = await fetch("/api/jobs/swap", { method: "POST", body: form })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || res.statusText)
-      setRun(data as SuggestRun)
-      setSelected(0)
-      setN(3)
+      const jobId = data.jobId as string
+      setSwapProgress(
+        data.mock
+          ? `Mock swap queued · est. $${Number(data.estimated_cost_usd).toFixed(2)} (not charged)`
+          : `Swap queued · est. $${Number(data.estimated_cost_usd).toFixed(2)}`
+      )
+
+      const job = await pollJob(jobId, ac.signal)
+      if (job.status === "failed") throw new Error(job.error || "swap failed")
+      const result = job.result as SwapResult | undefined
+      if (!result?.result_url) throw new Error("swap completed without result video")
+      setSwapResult(result)
+      setSwapProgress(null)
+      setConfirmCost(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      if ((e as Error).message !== "aborted") {
+        setError(e instanceof Error ? e.message : String(e))
+        setSwapProgress(null)
+      }
     } finally {
-      setLoading(false)
+      setSwapping(false)
     }
   }
 
@@ -83,14 +210,15 @@ export function SuggestApp() {
         />
         <div className="relative max-w-2xl space-y-3">
           <p className="font-mono text-xs uppercase tracking-[0.22em] text-[var(--ink-soft)]">
-            product-placement · suggest
+            product-placement
           </p>
           <h1 className="font-[family-name:var(--font-display)] text-4xl leading-[1.05] tracking-tight text-[var(--ink)] sm:text-5xl">
-            Find the moments
+            Suggest · swap
           </h1>
           <p className="max-w-xl text-base leading-relaxed text-[var(--ink-soft)]">
-            Upload a cut or point at a path on this machine. We return 3–5 face-free
-            ~5&nbsp;s windows with a placement box ready for crop-and-stitch swap.
+            Upload a cut, pick a face-free moment, drop a product, then run a
+            crop-and-stitch Seedance 2.5 swap. Jobs poll in the background — swaps
+            are capped at 5&nbsp;s / 720p and need an explicit cost confirm.
           </p>
         </div>
       </header>
@@ -137,8 +265,8 @@ export function SuggestApp() {
               type="button"
               isLoading={loading}
               loadingText="Suggesting…"
-              onClick={runSuggest}
-              disabled={loading}
+              onClick={() => runSuggest()}
+              disabled={loading || swapping}
             >
               Run suggest
             </HaloButton>
@@ -148,7 +276,7 @@ export function SuggestApp() {
               isLoading={loading}
               loadingText="Loading…"
               onClick={loadDemo}
-              disabled={loading}
+              disabled={loading || swapping}
             >
               Demo: hand-held cup
             </HaloButton>
@@ -156,10 +284,10 @@ export function SuggestApp() {
         </div>
       </section>
 
-      {loading && (
+      {(loading || progress) && (
         <div className="space-y-2 rounded-2xl border border-black/5 bg-white/80 p-4">
           <p className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
-            Scanning shots · faces · props
+            {progress || "Scanning shots · faces · props"}
           </p>
           <HaloProgress value={null} />
         </div>
@@ -197,6 +325,143 @@ export function SuggestApp() {
               />
             ))}
           </div>
+        </section>
+      )}
+
+      {run && selectedMoment && (
+        <section className="space-y-5 rounded-[28px] border border-black/5 bg-white/75 p-6 backdrop-blur">
+          <div>
+            <h2 className="font-[family-name:var(--font-display)] text-2xl text-[var(--ink)]">
+              Swap moment #{selected + 1}
+            </h2>
+            <p className="mt-1 max-w-2xl text-sm text-[var(--ink-soft)]">
+              Crop the placement box → hold ≈5&nbsp;s at 1280×720 → Seedance 2.5 →
+              feather stitch. Server cap: 5&nbsp;s input, 720p only.
+            </p>
+          </div>
+
+          <div className="grid gap-6 lg:grid-cols-2">
+            <HaloDropzone
+              accept="image/*,.png,.jpg,.jpeg,.webp"
+              multiple={false}
+              onFiles={onProductFiles}
+              emptyLabel="Drop a product image"
+              formatHint="PNG with alpha works best"
+              successLabel={productFile ? productFile.name : "Ready"}
+              className="min-h-[180px]"
+            />
+
+            <div className="flex flex-col gap-4">
+              <HaloField>
+                <HaloFieldLabel>Or sample product path</HaloFieldLabel>
+                <HaloInput
+                  value={productPath}
+                  onChange={(e) => setProductPath(e.target.value)}
+                  placeholder="assets/samples/soda_can.png"
+                />
+              </HaloField>
+              <HaloField>
+                <HaloFieldLabel>Target object</HaloFieldLabel>
+                <HaloInput
+                  value={target}
+                  onChange={(e) => setTarget(e.target.value)}
+                  placeholder="wine glass"
+                />
+              </HaloField>
+
+              <div className="rounded-2xl border border-amber-200/80 bg-amber-50/90 px-4 py-3 text-sm text-amber-950">
+                <p className="font-medium">
+                  Estimated Seedance cost: ${estimatedCost.toFixed(2)}
+                </p>
+                <p className="mt-1 text-amber-900/80">
+                  ~$0.3264/s at 720p · billed as ceil(seconds) · ~$1.63 for a 5&nbsp;s
+                  hold. Set <code className="font-mono">MOCK_HIGGSFIELD=1</code> to
+                  skip the paid call.
+                </p>
+                <label className="mt-3 flex cursor-pointer items-start gap-2">
+                  <input
+                    type="checkbox"
+                    className="mt-1"
+                    checked={confirmCost}
+                    onChange={(e) => setConfirmCost(e.target.checked)}
+                  />
+                  <span>
+                    I understand this may charge Higgsfield and want to run the swap
+                    on moment #{selected + 1}.
+                  </span>
+                </label>
+              </div>
+
+              <HaloButton
+                type="button"
+                isLoading={swapping}
+                loadingText="Swapping…"
+                onClick={runSwap}
+                disabled={swapping || loading || !confirmCost}
+              >
+                Run crop-and-stitch swap
+              </HaloButton>
+            </div>
+          </div>
+
+          {(swapping || swapProgress) && (
+            <div className="space-y-2 rounded-2xl border border-black/5 bg-white/80 p-4">
+              <p className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
+                {swapProgress || "Running swap…"}
+              </p>
+              <HaloProgress value={null} />
+            </div>
+          )}
+
+          {swapResult && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-end justify-between gap-3">
+                <div>
+                  <h3 className="font-[family-name:var(--font-display)] text-xl text-[var(--ink)]">
+                    Result
+                  </h3>
+                  <p className="font-mono text-xs text-muted-foreground">
+                    {swapResult.backend || "seedance"}
+                    {swapResult.mock ? " · mock" : ""}
+                    {swapResult.elapsed_s != null
+                      ? ` · ${swapResult.elapsed_s.toFixed(1)}s wall`
+                      : ""}
+                    {` · est. $${Number(swapResult.estimated_cost_usd).toFixed(2)}`}
+                  </p>
+                </div>
+                <a
+                  href={swapResult.download_url}
+                  className="inline-flex h-10 items-center justify-center rounded-full bg-[var(--ink)] px-5 text-sm font-medium text-white transition hover:opacity-90"
+                >
+                  Download result
+                </a>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="space-y-2">
+                  <p className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
+                    Original moment
+                  </p>
+                  <video
+                    className="aspect-video w-full rounded-xl bg-black object-contain"
+                    src={swapResult.original_url}
+                    controls
+                    playsInline
+                  />
+                </div>
+                <div className="space-y-2">
+                  <p className="font-mono text-xs uppercase tracking-wider text-muted-foreground">
+                    Swapped
+                  </p>
+                  <video
+                    className="aspect-video w-full rounded-xl bg-black object-contain"
+                    src={swapResult.result_url}
+                    controls
+                    playsInline
+                  />
+                </div>
+              </div>
+            </div>
+          )}
         </section>
       )}
     </div>

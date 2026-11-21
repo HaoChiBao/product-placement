@@ -11,7 +11,7 @@ import {
   TextureCardHeader,
   TextureCardTitle,
 } from "@/components/ui/texture-card"
-import type { Moment } from "@/lib/runs"
+import type { Moment } from "@/lib/types"
 
 function formatWindow(start: number, end: number) {
   const fmt = (t: number) => {

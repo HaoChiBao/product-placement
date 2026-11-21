@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "product-placement"
-version = "0.3.0"
-description = "Suggest placement moments and swap products via pluggable video-edit backends"
+version = "0.4.0"
+description = "Suggest placement moments and crop-stitch Seedance swaps (Docker/Railway UI)"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

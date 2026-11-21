@@ -27,7 +27,7 @@ Detect → track → paste PNG. Shipped as the overlay path on PR #1; generative
 - Seedance 2.5 via Higgsfield: face-free crop-and-stitch works better for moderation; `suggest` finds those moments.
 
 **M3 — evaluation + viewer**  
-Offline scores, then a Next.js viewer with a Viewer A / Viewer B brand toggle. A minimal Cult UI `suggest` page (`web/`) already runs local suggest and previews 5 s clips.
+Offline scores, then a Next.js viewer with a Viewer A / Viewer B brand toggle. The Cult UI app (`web/`) runs suggest → pick → product → async crop-and-stitch Seedance swap (poll jobs; cost confirm; Docker/Railway single service).
 
 ## How to run
 
