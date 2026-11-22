@@ -95,15 +95,16 @@ def extract_moment_clip(
     start_s: float,
     end_s: float,
     out_path: str | Path,
+    max_s: float | None = MAX_INPUT_S,
 ) -> Path:
     """Cut [start_s, end_s) from source; re-encode H.264, keep audio if present."""
     video = Path(video)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     duration = max(0.1, float(end_s) - float(start_s))
-    if duration > MAX_INPUT_S + 1e-3:
+    if max_s is not None and duration > float(max_s) + 1e-3:
         raise ValueError(
-            f"moment window {duration:.3f}s exceeds server cap of {MAX_INPUT_S}s"
+            f"moment window {duration:.3f}s exceeds server cap of {float(max_s):.3f}s"
         )
     cmd = [
         "ffmpeg",

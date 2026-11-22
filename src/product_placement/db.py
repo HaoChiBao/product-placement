@@ -207,6 +207,7 @@ CREATE TABLE IF NOT EXISTS placements (
     error TEXT,
     test_mode INT,
     backend TEXT,
+    cost_usd REAL,
     created_at TEXT,
     updated_at TEXT
 );
@@ -227,6 +228,7 @@ def init_schema(conn: Connection) -> None:
     conn.executescript(_SCHEMA)
     _ensure_column(conn, "episodes", "import_attempts", "INT DEFAULT 0")
     _ensure_column(conn, "titles", "source", "TEXT DEFAULT 'test'")
+    _ensure_column(conn, "placements", "cost_usd", "REAL")
     _backfill_title_source(conn)
     conn.commit()
 

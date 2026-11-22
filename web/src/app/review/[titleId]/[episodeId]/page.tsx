@@ -180,9 +180,12 @@ export default function ReviewPage() {
       setPlacements((ps) => ({ ...ps, [mm.id]: p }))
       if (status === "approved") {
         const held = Boolean(p.error?.toLowerCase().includes("key missing"))
+        const higgsfield = Boolean(p.error?.toLowerCase().includes("higgsfield"))
         showToast(
           held
-            ? "Queued — generation waiting on Higgsfield API key"
+            ? higgsfield
+              ? "Queued — generation waiting on Higgsfield API key"
+              : "Queued — generation waiting on OpenRouter API key"
             : "Placing your product in this moment…"
         )
         await saveCampaign({ brandId, episodeId, titleId, status: "in_progress" }).catch(() => {})
@@ -550,11 +553,17 @@ export default function ReviewPage() {
                 : "Done, view campaigns"}
             </ButtonLink>
             <p className="text-xs leading-[1.45] text-muted-foreground">
-              {gen?.ready
-                ? "Approving runs the real placement pipeline (Qwen edit + Seedance)."
-                : gen?.mock
-                  ? "Approving runs mock generation (MOCK_HIGGSFIELD is on)."
-                  : "Approving queues generation. Without a Higgsfield API key the placement stays queued — no fake clip is created."}
+              {!gen
+                ? "Approving queues generation."
+                : gen.ready
+                  ? gen.method === "higgsfield"
+                    ? "Approving runs the real placement pipeline (Qwen edit + Seedance)."
+                    : "Approving runs a full-clip Wan 3.0 swap."
+                  : gen.mock
+                    ? "Approving runs mock generation (MOCK_HIGGSFIELD is on)."
+                    : gen.method === "higgsfield"
+                      ? "Approving queues generation. Without a Higgsfield API key the placement stays queued — no fake clip is created."
+                      : "Approving queues generation. Without an OpenRouter API key the placement stays queued — no fake clip is created."}
             </p>
           </div>
         </aside>

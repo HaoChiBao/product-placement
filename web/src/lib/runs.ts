@@ -6,7 +6,13 @@ import { spawn } from "child_process"
 import type { JobStatus, SuggestRun } from "@/lib/types"
 
 export type { JobStatus, Moment, Region, SuggestRun } from "@/lib/types"
-export { SEEDANCE_USD_PER_S, MAX_SWAP_INPUT_S, estimateSwapCostUsd } from "@/lib/types"
+export {
+  SEEDANCE_USD_PER_S,
+  MAX_SWAP_INPUT_S,
+  WAN_720P_USD_PER_10S,
+  estimateSwapCostUsd,
+  estimateWanSwapCostUsd,
+} from "@/lib/types"
 
 export function repoRoot(): string {
   const env = (process.env.REPO_ROOT || "").trim()

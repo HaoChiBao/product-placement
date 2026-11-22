@@ -2,9 +2,11 @@ import fs from "fs"
 import path from "path"
 import { NextRequest, NextResponse } from "next/server"
 
+import { resolveSwapMethod } from "@/lib/generation"
 import {
   MAX_SWAP_INPUT_S,
   estimateSwapCostUsd,
+  estimateWanSwapCostUsd,
   newRunId,
   readRun,
   repoRoot,
@@ -32,10 +34,18 @@ export async function POST(req: NextRequest) {
     const productPathField = String(form.get("productPath") || "").trim()
     const productFile = form.get("product")
     const brandId = String(form.get("brandId") || "").trim()
+    const method = resolveSwapMethod(String(form.get("method") || ""))
+    const mock = ["1", "true", "yes", "on"].includes(
+      (process.env.MOCK_HIGGSFIELD || "").trim().toLowerCase()
+    )
 
     if (!confirm) {
+      const price =
+        method === "wan" && !mock
+          ? "Wan 3.0 swaps cost about $1.20 per 10s at 720p"
+          : "swaps cost ~$1.63 per 5s at 720p"
       return NextResponse.json(
-        { error: "confirm=true is required — swaps cost ~$1.63 per 5s at 720p" },
+        { error: `confirm=true is required — ${price}` },
         { status: 400 }
       )
     }
@@ -53,7 +63,7 @@ export async function POST(req: NextRequest) {
     }
 
     const duration = moment.end_s - moment.start_s
-    if (duration > MAX_SWAP_INPUT_S + 1e-6) {
+    if ((method === "higgsfield" || mock) && duration > MAX_SWAP_INPUT_S + 1e-6) {
       return NextResponse.json(
         { error: `moment window ${duration.toFixed(2)}s exceeds max ${MAX_SWAP_INPUT_S}s` },
         { status: 400 }
@@ -117,7 +127,8 @@ export async function POST(req: NextRequest) {
 
     const region: Region = moment.region
     const holdS = Math.min(4.96, Math.max(duration, 2))
-    const estimated = estimateSwapCostUsd(holdS)
+    const estimated =
+      method === "wan" && !mock ? estimateWanSwapCostUsd(duration) : estimateSwapCostUsd(holdS)
     const swapTarget = target || moment.whats_there || "object"
 
     const status: JobStatus = {
@@ -126,9 +137,7 @@ export async function POST(req: NextRequest) {
       status: "queued",
       progress: "Queued",
       estimated_cost_usd: estimated,
-      mock: ["1", "true", "yes", "on"].includes(
-        (process.env.MOCK_HIGGSFIELD || "").trim().toLowerCase()
-      ),
+      mock,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     }
@@ -155,6 +164,8 @@ export async function POST(req: NextRequest) {
       "--confirm",
       "--resolution",
       "720p",
+      "--method",
+      method,
     ]
     if (brandId) args.push("--brand-id", brandId)
     spawnJob(args, { jobId })

@@ -10,7 +10,7 @@ How a business goes from onboarding to a placed product in a catalog video.
 
 3. **`/videos`** — **Real** catalog: titles/episodes/moments from Postgres (or local SQLite) + object store. “Use this video” goes to `/review/<titleId>/<episodeId>`.
 
-4. **`/review/…`** — Loads real moments and placements. Approve/reject calls `POST /api/catalog/placements`, which upserts a placement and (when generation can run) spawns the existing `placement-swap` job → `frame_swap` (Qwen edit + Seedance i2v, or intentional mock when `MOCK_HIGGSFIELD` / explicit test mode). Ready clips land at `catalog/<slug>/sXXeYY/brands/<brand>/<placement>/clip.mp4`.
+4. **`/review/…`** — Loads real moments and placements. Approve/reject calls `POST /api/catalog/placements`, which upserts a placement and (when generation can run) spawns the `placement-swap` job. The default paid method is OpenRouter Wan 3.0 (full-clip). `SWAP_METHOD=higgsfield` keeps `frame_swap` (Qwen edit + Seedance i2v). `MOCK_HIGGSFIELD` / explicit test mode still uses that mock and does not call Wan. Ready clips land at `catalog/<slug>/sXXeYY/brands/<brand>/<placement>/clip.mp4`.
 
 5. **`/campaigns`** — Reads **campaign rows** from the DB (`draft` / `in_progress` / `live`), derived from draft saves and placement status. Live placements also appear on `/watch` via the watch payload overlay.
 
@@ -21,12 +21,12 @@ How a business goes from onboarding to a placed product in a catalog video.
 | Onboard | Form UX | Research defaults; no API |
 | Research | Brand + asset persist | TinyFish steps/profile |
 | Videos | Catalog list + moments | — |
-| Review approve | Placement row + swap job when keys allow | No fabricated clip if Higgsfield keys are missing |
+| Review approve | Placement row + swap job when keys allow | No fabricated clip if the active method's API key is missing |
 | Campaigns | DB campaigns + placement status | — |
 | Watch | Ready placement overlays | Only after a real (or intentional mock) render |
 
 ## Gaps that remain
 
 - TinyFish research is still mocked; profile text is local mock data even though the brand row is saved.
-- Paid generation needs `HF_KEY` or `HF_API_KEY_ID` + `HF_API_KEY_SECRET`. Without those (and without `MOCK_HIGGSFIELD`), approve leaves the placement **queued** with a clear “key missing” error — no fake clip.
+- Paid generation defaults to Wan 3.0 and needs `OPENROUTER_API_KEY` plus S3. `SWAP_METHOD=higgsfield` needs `HF_KEY` or `HF_API_KEY_ID` + `HF_API_KEY_SECRET` instead. Without the key for the active method (and without `MOCK_HIGGSFIELD`), approve leaves the placement **queued** with a clear “key missing” error — no fake clip.
 - Session pointer stays in the browser (`inset.session`); the source of truth for brand/product/campaigns/placements is the DB + bucket.

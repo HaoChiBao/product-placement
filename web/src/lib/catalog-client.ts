@@ -65,6 +65,7 @@ export type GenerationInfo = {
   ready: boolean
   mock: boolean
   keysConfigured: boolean
+  method?: "wan" | "higgsfield"
   reason?: string | null
 }
 
