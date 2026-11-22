@@ -143,6 +143,37 @@ export async function listMoments(episodeId: string, brandId?: string): Promise<
   return moments || []
 }
 
+export type BrandScan = {
+  id: string
+  episode_id: string
+  brand_id: string
+  status: "running" | "ready" | "failed" | "queued"
+  error?: string | null
+  updated_at?: string
+}
+
+/** Moments for a brand (its own scan once ready, else the shared ones) plus scan state. */
+export async function listBrandMoments(
+  episodeId: string,
+  brandId: string
+): Promise<{ moments: CatalogMoment[]; scan: BrandScan | null }> {
+  const q = new URLSearchParams({ episodeId, brandId })
+  const data = await getJson<{ moments: CatalogMoment[]; scan?: BrandScan | null }>(
+    `/api/catalog/moments?${q}`
+  )
+  return { moments: data.moments || [], scan: data.scan ?? null }
+}
+
+/** Start the brand-aware moment finder for this episode unless it already ran or is running. */
+export async function startBrandScan(episodeId: string, brandId: string): Promise<BrandScan | null> {
+  const data = await getJson<{ scan: BrandScan | null }>("/api/catalog/brand-scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ episodeId, brandId }),
+  })
+  return data.scan
+}
+
 export async function listPlacements(brandId: string, episodeId?: string): Promise<Placement[]> {
   const q = new URLSearchParams({ brandId })
   if (episodeId) q.set("episodeId", episodeId)

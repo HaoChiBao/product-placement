@@ -48,6 +48,16 @@ def moment_frame_key(slug: str, season: int, episode: int, index: int) -> str:
     return f"{episode_prefix(slug, season, episode)}/moments/moment_{int(index):02d}.jpg"
 
 
+def brand_moment_frame_key(
+    slug: str, season: int, episode: int, brand_slug_val: str, index: int
+) -> str:
+    """Frames from a brand scan live beside the brand's placements, not over the shared ones."""
+    return (
+        f"{episode_prefix(slug, season, episode)}/brands/{brand_slug_val}"
+        f"/moments/moment_{int(index):02d}.jpg"
+    )
+
+
 def placement_prefix(
     slug: str,
     season: int,

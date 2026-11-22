@@ -17,6 +17,7 @@ import urllib.error
 import urllib.request
 import zipfile
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -1508,12 +1509,14 @@ def insert_moment(
     frame_w: int = 0,
     frame_h: int = 0,
     moment_id: str | None = None,
+    brand_id: str | None = None,
 ) -> dict[str, Any]:
     mid = moment_id or new_id()
     region_json = region if isinstance(region, str) else json.dumps(region)
     conn.execute(
         "INSERT INTO moments (id, episode_id, start_s, end_s, region_json, whats_there, "
-        "score, reason, frame_key, frame_w, frame_h) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "score, reason, frame_key, frame_w, frame_h, brand_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             mid,
             episode_id,
@@ -1526,6 +1529,7 @@ def insert_moment(
             frame_key,
             int(frame_w or 0),
             int(frame_h or 0),
+            brand_id,
         ),
     )
     conn.commit()
@@ -1535,11 +1539,27 @@ def insert_moment(
 def list_moments(
     conn: Connection, *, episode_id: str, brand_id: str | None = None
 ) -> list[dict[str, Any]]:
-    moments = fetchall_dicts(
-        conn,
-        "SELECT * FROM moments WHERE episode_id = ? ORDER BY start_s",
-        (episode_id,),
-    )
+    """Moments for an episode. With a brand whose own scan finished, those replace
+    the brand-agnostic moments; otherwise the brand-agnostic ones are returned."""
+    moments: list[dict[str, Any]] = []
+    if brand_id:
+        scan = get_brand_scan(conn, episode_id=episode_id, brand_id=brand_id)
+        if scan and scan.get("status") == "ready":
+            # The brand's own moments, plus any shared moment it already acted on
+            # (approved or rejected before its scan finished) so none go missing.
+            moments = fetchall_dicts(
+                conn,
+                "SELECT * FROM moments WHERE episode_id = ? AND (brand_id = ? OR "
+                "(brand_id IS NULL AND id IN "
+                "(SELECT moment_id FROM placements WHERE brand_id = ?))) ORDER BY start_s",
+                (episode_id, brand_id, brand_id),
+            )
+    if not moments:
+        moments = fetchall_dicts(
+            conn,
+            "SELECT * FROM moments WHERE episode_id = ? AND brand_id IS NULL ORDER BY start_s",
+            (episode_id,),
+        )
     for m in moments:
         if isinstance(m.get("region_json"), str):
             try:
@@ -1557,6 +1577,76 @@ def list_moments(
                 m["brand_fit"] = _score_moment_for_brand(m, brand)
 
     return moments
+
+
+# ---------------------------------------------------------------------------
+# Brand scans: the moment finder re-run on one episode with a brand in the prompt
+# ---------------------------------------------------------------------------
+
+BRAND_SCAN_STALE_S = 900.0
+
+
+def brand_scan_id(episode_id: str, brand_id: str) -> str:
+    return f"{episode_id}:{brand_id}"
+
+
+def get_brand_scan(conn: Connection, *, episode_id: str, brand_id: str) -> dict[str, Any] | None:
+    return fetchone_dict(
+        conn, "SELECT * FROM brand_scans WHERE id = ?", (brand_scan_id(episode_id, brand_id),)
+    )
+
+
+def claim_brand_scan(
+    conn: Connection,
+    *,
+    episode_id: str,
+    brand_id: str,
+    stale_s: float = BRAND_SCAN_STALE_S,
+) -> bool:
+    """Atomically claim a brand scan. False when one is running or already ready.
+
+    A failed scan can be claimed again, and so can a running one whose worker
+    stopped updating it for `stale_s` seconds.
+    """
+    sid = brand_scan_id(episode_id, brand_id)
+    now = utc_now()
+    inserted = conn.execute(
+        "INSERT INTO brand_scans (id, episode_id, brand_id, status, error, created_at, updated_at) "
+        "VALUES (?, ?, ?, 'running', NULL, ?, ?) ON CONFLICT (id) DO NOTHING",
+        (sid, episode_id, brand_id, now, now),
+    )
+    conn.commit()
+    if int(getattr(inserted, "rowcount", 0) or 0) > 0:
+        return True
+    stale_before = (datetime.now(timezone.utc) - timedelta(seconds=stale_s)).isoformat()
+    updated = conn.execute(
+        "UPDATE brand_scans SET status = 'running', error = NULL, updated_at = ? "
+        "WHERE id = ? AND (status IN ('failed', 'queued') "
+        "OR (status = 'running' AND updated_at < ?))",
+        (now, sid, stale_before),
+    )
+    conn.commit()
+    return int(getattr(updated, "rowcount", 0) or 0) > 0
+
+
+def finish_brand_scan(
+    conn: Connection, *, episode_id: str, brand_id: str, status: str, error: str | None = None
+) -> dict[str, Any] | None:
+    conn.execute(
+        "UPDATE brand_scans SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+        (status, error, utc_now(), brand_scan_id(episode_id, brand_id)),
+    )
+    conn.commit()
+    return get_brand_scan(conn, episode_id=episode_id, brand_id=brand_id)
+
+
+def brand_moments(conn: Connection, *, episode_id: str, brand_id: str) -> dict[str, Any]:
+    """Moments for a brand plus the state of its brand scan, for the review page."""
+    scan = get_brand_scan(conn, episode_id=episode_id, brand_id=brand_id)
+    return {
+        "moments": list_moments(conn, episode_id=episode_id, brand_id=brand_id),
+        "scan": scan,
+    }
 
 
 def _brand_from_row(row: dict[str, Any], conn: Connection):
@@ -2436,6 +2526,14 @@ def build_parser() -> argparse.ArgumentParser:
     lm.add_argument("--episode-id", required=True)
     lm.add_argument("--brand-id", default=None)
 
+    bm = add("brand-moments")
+    bm.add_argument("--episode-id", required=True)
+    bm.add_argument("--brand-id", required=True)
+
+    gbs = add("get-brand-scan")
+    gbs.add_argument("--episode-id", required=True)
+    gbs.add_argument("--brand-id", required=True)
+
     add("list-brands")
 
     gb = add("get-brand")
@@ -2609,6 +2707,14 @@ def main(argv: list[str] | None = None) -> None:
             _print_json(
                 list_moments(conn, episode_id=args.episode_id, brand_id=args.brand_id)
             )
+            return
+
+        if args.command == "brand-moments":
+            _print_json(brand_moments(conn, episode_id=args.episode_id, brand_id=args.brand_id))
+            return
+
+        if args.command == "get-brand-scan":
+            _print_json(get_brand_scan(conn, episode_id=args.episode_id, brand_id=args.brand_id))
             return
 
         if args.command == "list-brands":

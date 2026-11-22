@@ -214,6 +214,16 @@ CREATE TABLE IF NOT EXISTS placements (
     updated_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS brand_scans (
+    id TEXT PRIMARY KEY,
+    episode_id TEXT,
+    brand_id TEXT,
+    status TEXT,
+    error TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS campaigns (
     id TEXT PRIMARY KEY,
     brand_id TEXT,
@@ -233,6 +243,8 @@ def init_schema(conn: Connection) -> None:
     _ensure_column(conn, "placements", "cost_usd", "REAL")
     _ensure_column(conn, "placements", "clip_start_s", "REAL")
     _ensure_column(conn, "placements", "clip_end_s", "REAL")
+    # NULL = the brand-agnostic scan; otherwise moments found for that brand.
+    _ensure_column(conn, "moments", "brand_id", "TEXT")
     _backfill_title_source(conn)
     conn.commit()
 
