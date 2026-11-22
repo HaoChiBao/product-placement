@@ -60,10 +60,7 @@ ENV REPO_ROOT=/app \
     MOCK_HIGGSFIELD=0
 
 EXPOSE 3000
-# Do not use Dockerfile VOLUME — Railway rejects it. Mount a Railway Volume at
-# /data in the dashboard if you want persistence; otherwise /data is ephemeral.
-
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${PORT}/api/health" || exit 1
+# Persist /data via a dashboard-mounted disk if needed; ephemeral is fine for the prototype.
+# App readiness is checked via railway.toml healthcheckPath (/api/health).
 
 CMD ["/app/entrypoint.sh"]
