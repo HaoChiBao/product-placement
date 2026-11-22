@@ -128,6 +128,8 @@ Higgsfield `POST .../bytedance/seedance-2.5/video-edit`. `--backend auto|seedanc
 
 ## Setup
 
+Copy [`.env.example`](.env.example) to `.env` and fill in what you need; Next reads these from the process environment (Railway and Docker inject them).
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
