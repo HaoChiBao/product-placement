@@ -1,4 +1,4 @@
-# Inset design system
+# Unskippable design system
 
 One system for brand flow (Annie / provider), campaigns, and Watch. Two surfaces share the same tokens: **brand** (light) and **cinema** (dark Watch shell).
 

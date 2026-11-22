@@ -124,30 +124,6 @@
     @apply text-[11px] uppercase tracking-[0.08em] text-muted-foreground font-medium;
   }
 
-  .logo-mark {
-    width: 22px;
-    height: 22px;
-    border-radius: 5px;
-    background: var(--foreground);
-    position: relative;
-    overflow: hidden;
-    flex: none;
-  }
-  .logo-mark::after {
-    content: "";
-    position: absolute;
-    inset: 6px 4px 4px 8px;
-    border: 1.5px dashed var(--accent);
-    border-radius: 2px;
-  }
-  .theme-cinema .logo-mark {
-    width: 20px;
-    height: 20px;
-  }
-  .theme-cinema .logo-mark::after {
-    inset: 5px 3px 3px 7px;
-  }
-
   .thumb {
     @apply relative aspect-video overflow-hidden bg-stage max-w-full;
     border-radius: var(--radius-md);

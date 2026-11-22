@@ -1,5 +1,5 @@
 import type { Metadata } from "next"
-import { Bricolage_Grotesque, Geist, Geist_Mono } from "next/font/google"
+import { Bebas_Neue, Bricolage_Grotesque, Geist, Geist_Mono } from "next/font/google"
 
 import "./globals.css"
 
@@ -7,6 +7,13 @@ const display = Bricolage_Grotesque({
   subsets: ["latin"],
   weight: ["500", "700"],
   variable: "--font-display",
+})
+
+/** Condensed all-caps wordmark face (free stand-in for Netflix's proprietary logotype). */
+const brand = Bebas_Neue({
+  subsets: ["latin"],
+  weight: "400",
+  variable: "--font-brand",
 })
 
 const body = Geist({
@@ -21,14 +28,14 @@ const mono = Geist_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "Inset",
+  title: "Unskippable",
   description: "Place your product inside creator videos",
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="dark">
-      <body className={`${display.variable} ${body.variable} ${mono.variable}`}>
+      <body className={`${display.variable} ${brand.variable} ${body.variable} ${mono.variable}`}>
         {children}
       </body>
     </html>
