@@ -229,3 +229,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+runs/
+checkpoints/
+third_party/
+.venv/
+out.mp4

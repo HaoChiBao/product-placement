@@ -1,0 +1,248 @@
+"""Self-host Wan 2.1 VACE 14B on Modal (diffusers WanVACEPipeline).
+
+Entry point: Hugging Face Diffusers `WanVACEPipeline` with
+`Wan-AI/Wan2.1-VACE-14B-diffusers` (same weights as `Wan-AI/Wan2.1-VACE-14B`).
+Docs: https://huggingface.co/docs/diffusers/api/pipelines/wan
+Official CLI twin: https://github.com/Wan-Video/Wan2.1/blob/main/generate.py
+(`--task vace-14B`, `--src_video` / `--src_mask` / `--src_ref_images`).
+
+Task choice (object swap): reference-guided masked V2V inpainting. Pass the
+source video, a mask video (white = regenerate the target object region,
+black = keep source), and the product PNG as `reference_images`. Without a
+region mask the whole frame is regenerated and VACE tends to restyle the
+shot instead of swapping the object.
+
+Deploy:
+  modal deploy modal_app/wan_vace.py
+
+Lookup from the client:
+  modal.Function.from_name("product-placement-wan-vace", "edit")
+"""
+
+from __future__ import annotations
+
+import io
+import tempfile
+from pathlib import Path
+
+import modal
+
+APP_NAME = "product-placement-wan-vace"
+MODEL_ID = "Wan-AI/Wan2.1-VACE-14B-diffusers"
+VOLUME_PATH = "/models"
+WEIGHTS_DIR = f"{VOLUME_PATH}/Wan2.1-VACE-14B-diffusers"
+# LightX2V step+CFG distill LoRA for Wan2.1 T2V 14B (VACE's base). Linked from
+# the Diffusers Wan docs; run with ~4-8 steps and guidance_scale=1.0.
+DISTILL_LORA_REPO = "Kijai/WanVideo_comfy"
+DISTILL_LORA_FILE = "Lightx2v/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16.safetensors"
+
+# H100 80GB fits 14B bf16; A100-80GB is the fallback if H100 is scarce.
+GPU = "H100"
+
+image = (
+    modal.Image.debian_slim(python_version="3.11")
+    .apt_install("ffmpeg", "libgl1", "libglib2.0-0")
+    .pip_install(
+        "torch==2.6.0",
+        "torchvision==0.21.0",
+        "diffusers>=0.33.0",
+        "transformers>=4.46.0,<5",
+        "accelerate>=1.1.0",
+        "huggingface-hub>=0.26.0",
+        "safetensors",
+        "sentencepiece",
+        "imageio",
+        "imageio-ffmpeg",
+        "opencv-python-headless==4.10.0.84",
+        "Pillow",
+        "numpy==1.26.4",
+        "ftfy",
+        "peft>=0.15.0",
+    )
+)
+
+volume = modal.Volume.from_name("wan-vace-14b-weights", create_if_missing=True)
+app = modal.App(APP_NAME, image=image)
+
+
+def _ensure_weights() -> str:
+    """Download weights into the Modal volume once, then reuse."""
+    target = Path(WEIGHTS_DIR)
+    marker = target / "model_index.json"
+    if marker.is_file():
+        return str(target)
+    target.mkdir(parents=True, exist_ok=True)
+    from huggingface_hub import snapshot_download
+
+    snapshot_download(
+        repo_id=MODEL_ID,
+        local_dir=str(target),
+        local_dir_use_symlinks=False,
+    )
+    volume.commit()
+    return str(target)
+
+
+def _load_pipeline(ckpt_dir: str):
+    import torch
+    from diffusers import AutoencoderKLWan, WanVACEPipeline
+    from diffusers.schedulers.scheduling_unipc_multistep import UniPCMultistepScheduler
+
+    vae = AutoencoderKLWan.from_pretrained(
+        ckpt_dir, subfolder="vae", torch_dtype=torch.float32
+    )
+    pipe = WanVACEPipeline.from_pretrained(
+        ckpt_dir, vae=vae, torch_dtype=torch.bfloat16
+    )
+    # 5.0 for 720P per Diffusers Wan docs.
+    pipe.scheduler = UniPCMultistepScheduler.from_config(
+        pipe.scheduler.config, flow_shift=5.0
+    )
+    from huggingface_hub import hf_hub_download
+
+    lora = hf_hub_download(DISTILL_LORA_REPO, DISTILL_LORA_FILE, cache_dir=f"{VOLUME_PATH}/hf")
+    volume.commit()
+    pipe.load_lora_weights(lora, adapter_name="distill")
+    pipe.to("cuda")
+    return pipe
+
+
+def _decode_video_frames(video_bytes: bytes, max_frames: int = 81):
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp:
+        tmp.write(video_bytes)
+        tmp.flush()
+        cap = cv2.VideoCapture(tmp.name)
+        if not cap.isOpened():
+            raise RuntimeError("Could not open input video bytes")
+        frames = []
+        fps = cap.get(cv2.CAP_PROP_FPS) or 16.0
+        while len(frames) < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(Image.fromarray(rgb))
+        cap.release()
+    if not frames:
+        raise RuntimeError("Input video has no frames")
+    # Wan VACE expects frame_num = 4k + 1.
+    n = len(frames)
+    target = min(max_frames, n - ((n - 1) % 4))
+    if target < 5:
+        target = 5 if n >= 5 else n
+        while target > 1 and (target - 1) % 4 != 0:
+            target -= 1
+    frames = frames[:target]
+    return frames, float(fps)
+
+
+def _orient_hw(height: int, width: int, *, portrait: bool) -> tuple[int, int]:
+    """Keep the requested tier but match source orientation (no squash)."""
+    short, long = sorted((height, width))
+    if portrait:
+        return long, short  # taller than wide
+    return short, long
+
+
+def _resize_frames(frames, height: int, width: int):
+    return [f.convert("RGB").resize((width, height)) for f in frames]
+
+
+def _mask_frames(mask_video_bytes: bytes | None, num_frames: int, height: int, width: int):
+    """White = generate, black = keep source. No mask → regenerate the whole frame."""
+    from PIL import Image
+
+    if mask_video_bytes is None:
+        return [Image.new("L", (width, height), 255)] * num_frames
+    frames, _ = _decode_video_frames(mask_video_bytes, max_frames=num_frames)
+    if len(frames) != num_frames:
+        raise ValueError(f"mask has {len(frames)} frames, video has {num_frames}")
+    return [
+        f.convert("L").resize((width, height)).point(lambda v: 255 if v > 127 else 0)
+        for f in frames
+    ]
+
+
+def _export_mp4(frames, fps: float) -> bytes:
+    from diffusers.utils import export_to_video
+
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "out.mp4"
+        export_to_video(frames, str(out), fps=max(fps, 1.0), quality=9)
+        return out.read_bytes()
+
+
+@app.function(
+    gpu=GPU,
+    timeout=60 * 40,
+    volumes={VOLUME_PATH: volume},
+    memory=65536,
+)
+def edit(
+    video_bytes: bytes,
+    reference_image_bytes: bytes,
+    prompt: str,
+    *,
+    height: int = 720,
+    width: int = 1280,
+    num_inference_steps: int = 30,
+    guidance_scale: float = 5.0,
+    mask_video_bytes: bytes | None = None,
+    negative_prompt: str | None = None,
+    max_frames: int = 81,
+    seed: int = 0,
+    distill: bool = False,
+) -> bytes:
+    """Run reference-guided VACE inpaint; return mp4 bytes. No safety checker."""
+    import torch
+    from PIL import Image
+
+    ckpt = _ensure_weights()
+    # Cache the pipeline on the container between warm calls.
+    if not hasattr(edit, "_pipe"):
+        edit._pipe = _load_pipeline(ckpt)
+    pipe = edit._pipe
+    if distill:
+        pipe.enable_lora()
+    else:
+        pipe.disable_lora()
+
+    frames, fps = _decode_video_frames(video_bytes, max_frames=max_frames)
+    src_w, src_h = frames[0].size
+    height, width = _orient_hw(height, width, portrait=src_h > src_w)
+    frames = _resize_frames(frames, height, width)
+    mask = _mask_frames(mask_video_bytes, len(frames), height, width)
+    if mask_video_bytes is not None:
+        # VACE inpainting convention: masked source pixels are neutral gray,
+        # otherwise the original object leaks through the reactive stream.
+        gray = Image.new("RGB", (width, height), (128, 128, 128))
+        frames = [Image.composite(gray, f, m) for f, m in zip(frames, mask)]
+    ref = Image.open(io.BytesIO(reference_image_bytes)).convert("RGB")
+
+    result = pipe(
+        video=frames,
+        mask=mask,
+        reference_images=[ref],
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        height=height,
+        width=width,
+        num_frames=len(frames),
+        num_inference_steps=num_inference_steps,
+        guidance_scale=guidance_scale,
+        generator=torch.Generator("cuda").manual_seed(seed),
+    )
+    out_frames = result.frames[0]
+    return _export_mp4(out_frames, fps)
+
+
+@app.local_entrypoint()
+def main():
+    print(
+        f"Deployed app={APP_NAME!r} fn=edit gpu={GPU} model={MODEL_ID}. "
+        "Call via modal.Function.from_name(...).remote(video, image, prompt)."
+    )

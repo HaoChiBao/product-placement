@@ -1,86 +1,81 @@
 # product-placement
 
-Swap an object in a short video clip for a branded product image.
-
-Long-term goal: `swap(clip, target, product_image) -> new_clip`. Milestone 1 only covers detect → track → composite. A generation/inpainting step can slot in between tracking and compositing later without rewriting the pipeline.
-
-## Milestone 1
-
-1. **Find** the target with Grounding DINO text (`--target "coffee cup"`) or a click point (`--point x,y --frame n`).
-2. **Track** it with SAM 2 video segmentation across every frame.
-3. **Composite** a static product PNG (with alpha) onto each tracked mask: stretch to the mask box, optional mild orientation, feathered edges, light color matching to surrounding pixels.
-
-This proves tracking and blending, not photoreal replacement.
-
-## Setup
-
-Python 3.10+ recommended. CPU works; CUDA is used automatically when available.
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-
-# CPU PyTorch (skip if you already have a CUDA build of 2.5.1+)
-pip install torch==2.5.1 torchvision==0.20.1 --index-url https://download.pytorch.org/whl/cpu
-
-pip install -r requirements.txt
-pip install -e .
-
-# SAM 2 from Meta (skip CUDA extension on CPU-only machines)
-SAM2_BUILD_CUDA=0 pip install "SAM-2 @ git+https://github.com/facebookresearch/sam2.git@2b90b9f5ceec907a1c18123530e92e794ad901a4"
-
-# SAM 2.1 tiny checkpoint (~149 MB)
-bash scripts/download_checkpoints.sh
-```
-
-### Checkpoints downloaded
-
-| Model | Source | Local path | Notes |
-| --- | --- | --- | --- |
-| Grounding DINO tiny | Hugging Face `IDEA-Research/grounding-dino-tiny` | HF cache on first run | Open-vocabulary detector |
-| SAM 2.1 Hiera tiny | [facebookresearch/sam2](https://github.com/facebookresearch/sam2) | `checkpoints/sam2.1_hiera_tiny.pt` | Config `configs/sam2.1/sam2.1_hiera_t.yaml` |
-
-CPU is supported. Expect roughly 1–2 minutes for a 5 s / 12 fps / 360×640 clip on a modern CPU with the tiny SAM checkpoint. GPU is much faster when present.
-
-## CLI
+`swap(clip, target, product_image) -> new_clip` using a pluggable generative video-edit backend. Design notes for collaborators: [docs/DESIGN.md](docs/DESIGN.md).
 
 ```bash
 python -m product_placement swap \
-  --clip assets/samples/coffee_cup.mp4 \
-  --target "coffee cup" \
-  --product assets/samples/soda_can.png \
-  --out artifacts/swap_out.mp4 \
-  --side-by-side artifacts/side_by_side.jpg \
-  --mask-overlay artifacts/mask_overlay.jpg
-```
-
-Click-point alternative:
-
-```bash
-python -m product_placement swap \
-  --clip assets/samples/coffee_cup.mp4 \
-  --point 220,300 --frame 0 \
+  --model seedance|wan27|wan-vace|wan-vace-modal \
+  --clip assets/samples/hand_held_cup.mp4 \
+  --target "metal mug" \
   --product assets/samples/soda_can.png \
   --out out.mp4
 ```
 
-## Package layout
+Original clip audio is muxed back onto the edited video for every model.
 
+## Models
+
+| `--model` | Provider | Credentials |
+|-----------|----------|-------------|
+| `seedance` (default) | Higgsfield Seedance 2.5 (+ Genjutsu fallback via `--backend`) | `HF_KEY` or `HF_API_KEY_ID` + `HF_API_KEY_SECRET` |
+| `wan27` | Replicate `wan-video/wan-2.7-videoedit` | `REPLICATE_API_TOKEN` |
+| `wan-vace` | fal `fal-ai/wan-vace-apps/video-edit` | `FAL_KEY` |
+| `wan-vace-modal` | Self-hosted Wan 2.1 VACE 14B on Modal | `MODAL_TOKEN_ID` + `MODAL_TOKEN_SECRET` |
+
+### seedance
+
+Higgsfield `POST .../bytedance/seedance-2.5/video-edit`. `--backend auto|seedance|genjutsu` (default `auto`).
+
+### wan27
+
+Replicate input: `video`, `prompt`, `reference_image`, `resolution`, `audio_setting=origin`. Schema source: https://replicate.com/wan-video/wan-2.7-videoedit/api — no `disable_safety_checker` field.
+
+### wan-vace
+
+fal queue body: `prompt`, `video_url`, `image_urls`, `resolution`, `enable_safety_checker: false`. Schema source: fal `wan-vace-apps/video-edit`.
+
+### wan-vace-modal (self-host)
+
+Runs open **Wan-AI/Wan2.1-VACE-14B** (Diffusers id `Wan-AI/Wan2.1-VACE-14B-diffusers`) on Modal.
+
+**VACE task:** reference-guided masked inpainting — source frames + a mask video of the target object (white = replace; masked pixels are grayed per VACE convention) + product as `reference_images`. Without a mask the whole frame is regenerated and the object usually is not swapped. Use a generous, single-blob mask (dilated convex hull of the target); a tight object-shaped mask makes VACE redraw the original object.
+
+Optional `distill=True` on the Modal function enables the LightX2V step/CFG-distill LoRA (`Kijai/WanVideo_comfy`, `Lightx2v/lightx2v_T2V_14B_cfg_step_distill_v2_lora_rank64_bf16.safetensors`): use ~6 steps and `guidance_scale=1.0` for fast drafts (~3x faster per round), then a full run (20 steps, guidance 5) for the final, which follows the reference more faithfully.
+
+**Entry point:** Diffusers [`WanVACEPipeline`](https://huggingface.co/docs/diffusers/api/pipelines/wan) (same task surface as Wan2.1 [`generate.py --task vace-14B`](https://github.com/Wan-Video/Wan2.1/blob/main/generate.py)).
+
+Deploy (needs Modal account + GPU billing):
+
+```bash
+pip install modal
+modal token set   # or export MODAL_TOKEN_ID / MODAL_TOKEN_SECRET
+modal deploy modal_app/wan_vace.py
 ```
-src/product_placement/
-  detect.py      # Grounding DINO or point prompt
-  track.py       # SAM 2 mask propagation
-  generate.py    # no-op slot for later inpainting
-  composite.py   # warp + feather + mild color match
-  pipeline.py    # detect → track → maybe_generate → composite
-  cli.py
+
+- **GPU:** H100 (80GB). Weights cached in Modal Volume `wan-vace-14b-weights`.
+- **Rough cost:** H100 ≈ $0.0011/s (~$3.95/hr). A short 720p clip (~3–8 min wall time once warm) is roughly **$0.20–$0.60**; cold start + weight load can push a first clip toward **~$1–3**. Not verified live in this repo.
+
+Client looks up `modal.Function.from_name("product-placement-wan-vace", "edit")`. Missing `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` raises an error that names them.
+
+## Setup
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+pip install -e .
 ```
+
+`ffmpeg` is required (Genjutsu prep + audio mux).
 
 ## Sample assets
 
-- **Still cup clip:** Pexels video [#4973718](https://www.pexels.com/video/a-cup-of-coffee-and-a-book-on-a-table-4973718/) by Taryn Elliott. License: [Pexels License](https://www.pexels.com/license/) (free to use). Trimmed to 5 s at 12 fps, 360×640, in `assets/samples/coffee_cup.mp4`.
-- **Hand-held cup clip:** Pexels video [#6204700](https://www.pexels.com/video/person-holding-a-cup-of-hot-coffee-6204700/) by Tima Miroshnichenko. License: [Pexels License](https://www.pexels.com/license/). Locked-off close-up of a hand holding a metal mug with modest motion. Kept at ~10 s (source is 9.64 s), 12 fps, 360×640, in `assets/samples/hand_held_cup.mp4`.
-- **Product:** Self-made soda-can PNG with alpha (`assets/samples/soda_can.png`), generated by `scripts/make_demo_assets.py`. Not a real brand mark.
+- `assets/samples/hand_held_cup.mp4` — Pexels [#6204700](https://www.pexels.com/video/person-holding-a-cup-of-hot-coffee-6204700/) (Pexels License)
+- `assets/samples/soda_can.png` — self-made PNG with alpha
+
+## Optional eval
+
+`pip install -e '.[eval]'`, then `product_placement.eval.evaluate_swap(...)`.
 
 ## Tests
 
@@ -88,55 +83,19 @@ src/product_placement/
 pytest -q
 ```
 
-`tests/test_composite.py` exercises warping and blending on synthetic arrays and does not need model weights.
+Mocked HTTP / Modal client routing only; CI does not call live APIs or deploy Modal.
 
-## Proof run (this repo)
+## Package
 
-Command:
-
-```bash
-python -m product_placement swap \
-  --clip assets/samples/coffee_cup.mp4 \
-  --target "coffee cup" \
-  --product assets/samples/soda_can.png \
-  --out artifacts/swap_out.mp4 \
-  --device cpu \
-  --work-dir runs/proof \
-  --sam-checkpoint checkpoints/sam2.1_hiera_tiny.pt \
-  --side-by-side artifacts/side_by_side.jpg \
-  --mask-overlay artifacts/mask_overlay.jpg
 ```
-
-- **Device:** CPU (`torch 2.5.1+cpu`)
-- **Runtime:** ~92 s for 60 frames
-- **Detection:** `coffee cup` score ≈ 0.95
-- **Artifacts:** `artifacts/swap_out.mp4`, `artifacts/side_by_side.jpg`, `artifacts/mask_overlay.jpg`
-
-### Quality notes
-
-Tracking holds on this mostly-still cup for the full 5 s; the mask stays on the mug body and handle through the last frame. Compositing stretches the can into the mask box with feathering and mild surround color matching, so the swap is obvious but not seamless: the handle silhouette remains, the can does not wrap in true cylinder perspective, and soft edges still show against the white ceramic and coffee surface. That is expected for milestone 1 before generative inpainting.
-
-## Second proof: hand-held cup (~10 s)
-
-```bash
-python -m product_placement swap \
-  --clip assets/samples/hand_held_cup.mp4 \
-  --target "coffee cup" \
-  --product assets/samples/soda_can.png \
-  --out artifacts/hand_held_swap_out.mp4 \
-  --device cpu \
-  --work-dir runs/hand_held_proof \
-  --sam-checkpoint checkpoints/sam2.1_hiera_tiny.pt
+src/product_placement/
+  backends.py     # seedance / wan27 / wan-vace / wan-vace-modal
+  audio.py        # mux original audio
+  higgsfield.py
+  prepare.py
+  pipeline.py
+  cli.py
+  eval.py
+modal_app/
+  wan_vace.py     # Modal deploy target
 ```
-
-Late-frame mask overlay was written separately to `artifacts/hand_held_mask_overlay_late.jpg` (frame 116).
-
-- **Source:** https://www.pexels.com/video/person-holding-a-cup-of-hot-coffee-6204700/
-- **Device:** CPU (`torch 2.5.1+cpu`)
-- **Runtime:** ~192 s for 117 frames
-- **Detection:** `coffee cup` score ≈ 0.92
-- **Artifacts:** `artifacts/hand_held_swap_out.mp4`, `artifacts/hand_held_side_by_side.jpg`, `artifacts/hand_held_mask_overlay.jpg`, `artifacts/hand_held_mask_overlay_late.jpg`
-
-### Quality notes (hand-held)
-
-The mask stays on the mug through the modest hand motion; area stays in a tight band (~36k–38k pixels). It is not perfectly locked to cup-only pixels: the thin wire handle is included, and green spills onto the thumb/fingers at the grip in both early and late frames. The late overlay still covers the mug body, with some jaggedness on the rim and a bit of bleed at the handle–skin contact. That hand leakage is the main failure mode versus the tabletop cup.
