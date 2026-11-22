@@ -301,7 +301,12 @@ def register_preloaded_episode(
         (title["id"], int(season), int(episode)),
     )
     if prior:
-        return get_episode(conn, id=prior["id"])  # type: ignore[return-value]
+        existing = get_episode(conn, id=prior["id"])
+        return {
+            "title": get_title(conn, id=title["id"]),
+            "episode": existing,
+            "video_key": (existing or {}).get("video_key") or key,
+        }
     ep = create_episode(
         conn,
         title_id=title["id"],
@@ -943,14 +948,9 @@ def seed_blender_open_movies(
                 suggest_status="queued",
             )
             created.append(ep)
-            # Promote first episode poster onto the title for catalog grids.
-            if ep.get("poster_key") and not title.get("poster_key"):
-                conn.execute(
-                    "UPDATE titles SET poster_key = ? WHERE id = ?",
-                    (ep["poster_key"], title["id"]),
-                )
-                conn.commit()
-                title["poster_key"] = ep["poster_key"]
+            # create_episode already writes catalog/<slug>/poster.jpg when the
+            # title has none. Refresh so a later episode does not see a stale row.
+            title = get_title(conn, id=title["id"]) or title
 
     titles_out = list_titles(conn)
     if own:

@@ -137,6 +137,17 @@ def test_create_title_episode_moment_brand_placement(catalog_env, tmp_path):
     )
     assert attached["episode"]["video_key"] == preload_key
     assert attached["episode"]["poster_key"] is None
+    again = register_preloaded_episode(
+        conn,
+        name="Demo Film",
+        kind="movie",
+        slug="demo-film",
+        season=1,
+        episode=2,
+        video_key=preload_key,
+    )
+    assert again["episode"]["video_key"] == preload_key
+    assert again["video_key"] == preload_key
 
     moment = insert_moment(
         conn,
@@ -315,7 +326,10 @@ def test_seed_blender_mocked(catalog_env, tmp_path, monkeypatch):
     assert result["skipped"] is False
     assert result["episodes_created"] >= 1
     titles = list_titles(conn)
-    assert any(t["slug"] == "big-buck-bunny" for t in titles)
+    bunny = next(t for t in titles if t["slug"] == "big-buck-bunny")
+    assert bunny["poster_key"] == "catalog/big-buck-bunny/poster.jpg"
+    steel = next(t for t in titles if t["slug"] == "tears-of-steel")
+    assert steel["poster_key"] == "catalog/tears-of-steel/poster.jpg"
     assert all(
         (t.get("attribution") or "").startswith("CC-BY") for t in titles if t["slug"]
     )
