@@ -1,4 +1,4 @@
-"""Async job runner for suggest + crop-stitch Seedance swap (disk status JSON)."""
+"""Async job runner for suggest + frame-based Seedance i2v swap (disk status JSON)."""
 
 from __future__ import annotations
 
@@ -161,29 +161,21 @@ def run_swap_job(
     resolution: str = "720p",
     brand_id: str | None = None,
 ) -> dict[str, Any]:
+    """Frame-based swap: extract frame → edit → Seedance i2v (or mock)."""
     from product_placement.crop_stitch import (
         MAX_INPUT_S,
-        Region,
-        TARGET_HOLD_S,
-        build_crop_hold,
-        estimate_seedance_cost_usd,
+        estimate_frame_swap_cost_usd,
         extract_moment_clip,
-        mock_edit_crop,
-        probe_video,
-        stitch_edit_into_moment,
     )
-    from product_placement.higgsfield import default_swap_prompt
+    from product_placement.frame_swap import clamp_i2v_duration, run_frame_swap
 
-    brand = None
-    prompt = None
     if brand_id:
-        from product_placement.brand import brand_swap_prompt, load_brand, primary_asset_path
+        from product_placement.brand import load_brand, primary_asset_path
 
         brand = load_brand(brand_id)
         asset = primary_asset_path(brand)
         if asset and asset.is_file():
             product_path = asset
-        prompt = brand_swap_prompt(brand, target)
 
     if not confirm:
         raise ValueError("confirm=true is required before a paid (or mock) swap")
@@ -196,8 +188,8 @@ def run_swap_job(
     if duration > MAX_INPUT_S + 1e-3:
         raise ValueError(f"input window {duration:.3f}s exceeds max {MAX_INPUT_S}s")
 
-    hold_s = min(TARGET_HOLD_S, max(duration, 2.0))
-    estimated = estimate_seedance_cost_usd(hold_s)
+    i2v_duration = clamp_i2v_duration(duration)
+    estimated = estimate_frame_swap_cost_usd(float(i2v_duration))
     out = job_dir(job_id)
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -206,7 +198,7 @@ def run_swap_job(
         job_id,
         type="swap",
         status="running",
-        progress="Extracting moment + building crop",
+        progress="Extracting frame + editing for Seedance i2v",
         created_at=utc_now(),
         estimated_cost_usd=estimated,
         mock=mock_higgsfield_enabled(),
@@ -216,49 +208,35 @@ def run_swap_job(
 
     t0 = time.perf_counter()
     try:
-        reg = Region.from_dict(region)
+        # Keep original moment for side-by-side UI.
         moment_clip = extract_moment_clip(
             video_path, start_s, end_s, work / "moment.mp4"
         )
-        crop_hold = build_crop_hold(
-            moment_clip, reg, work / "crop_hold.mp4", hold_s=hold_s
-        )
-        _, _, crop_dur, _ = probe_video(crop_hold)
-        if crop_dur > MAX_INPUT_S + 1e-3:
-            raise ValueError(f"crop hold {crop_dur:.3f}s exceeds max {MAX_INPUT_S}s")
-
-        edited = work / "seedance_edit.mp4"
-        backend = "mock" if mock_higgsfield_enabled() else "seedance"
-        if mock_higgsfield_enabled():
-            write_status(job_id, progress="Mock Seedance edit (MOCK_HIGGSFIELD=1)")
-            mock_edit_crop(crop_hold, product_path, edited)
-            request_id = "mock"
-            video_url = ""
-        else:
-            write_status(job_id, progress="Uploading + running Seedance 2.5")
-            from product_placement.backends import seedance_edit
-
-            result = seedance_edit(
-                crop_hold,
-                Path(product_path),
-                prompt or default_swap_prompt(target),
-                out_path=edited,
-                work_dir=work / "hf",
-                resolution="720p",
-                backend="seedance",
-            )
-            request_id = result.request_id
-            video_url = result.video_url
-            backend = result.backend or "seedance"
-
-        write_status(job_id, progress="Feather-stitching edit into moment")
-        stitched = stitch_edit_into_moment(
-            moment_clip, edited, reg, out / "result.mp4"
-        )
-        # Also keep original moment for side-by-side UI.
         original = out / "original.mp4"
         if not original.exists():
             original.write_bytes(moment_clip.read_bytes())
+
+        result_path = out / "result.mp4"
+        write_status(
+            job_id,
+            progress=(
+                "Mock frame swap (MOCK_HIGGSFIELD=1)"
+                if mock_higgsfield_enabled()
+                else "Frame edit + Seedance 2.5 image-to-video"
+            ),
+        )
+        meta = run_frame_swap(
+            video_path=video_path,
+            product_path=product_path,
+            start_s=start_s,
+            end_s=end_s,
+            region=region,
+            target=target,
+            out_path=result_path,
+            work_dir=work / "frame",
+            confirm=True,
+            test_mode=mock_higgsfield_enabled(),
+        )
 
         elapsed = time.perf_counter() - t0
         payload = {
@@ -266,18 +244,23 @@ def run_swap_job(
             "result_url": f"/api/jobs/{job_id}/file/result.mp4",
             "download_url": f"/api/jobs/{job_id}/file/result.mp4?download=1",
             "original_path": str(original),
-            "result_path": str(stitched),
-            "backend": backend,
-            "request_id": request_id,
-            "video_url": video_url,
+            "result_path": str(result_path),
+            "backend": meta.get("backend") or (
+                "mock" if mock_higgsfield_enabled() else "seedance-i2v"
+            ),
+            "request_id": meta.get("request_id") or "",
+            "edit_request_id": meta.get("edit_request_id") or "",
+            "video_url": meta.get("video_url") or "",
             "estimated_cost_usd": estimated,
-            "billed_duration_s": round(crop_dur, 3),
+            "billed_duration_s": meta.get("billed_duration_s") or float(i2v_duration),
             "elapsed_s": round(elapsed, 3),
             "mock": mock_higgsfield_enabled(),
             "target": target,
             "start_s": start_s,
             "end_s": end_s,
             "region": region,
+            "frame_path": meta.get("frame_path"),
+            "edited_frame_path": meta.get("edited_frame_path"),
         }
         (out / "swap.json").write_text(json.dumps(payload, indent=2) + "\n")
         return write_status(
@@ -460,22 +443,26 @@ def run_placement_swap_job(
             region = json.loads(moment["region_json"] or "{}")
             target = moment.get("whats_there") or "object"
 
+            from product_placement.frame_swap import run_frame_swap
+
+            work = tmp_path / "frame_swap"
+            result_path = work / "clip.mp4"
             # Force mock when test_mode; paid path leaves MOCK_HIGGSFIELD to env.
             prev_mock = os.environ.get("MOCK_HIGGSFIELD")
             if test_mode:
                 os.environ["MOCK_HIGGSFIELD"] = "1"
             try:
-                job_id = new_job_id()
-                result = run_swap_job(
-                    job_id,
+                meta = run_frame_swap(
                     video_path=video_path,
                     product_path=product_path,
                     start_s=float(moment["start_s"]),
                     end_s=float(moment["end_s"]),
                     region=region,
                     target=target,
+                    out_path=result_path,
+                    work_dir=work / "work",
                     confirm=True,
-                    brand_id=brand_row["id"],
+                    test_mode=test_mode,
                 )
             finally:
                 if test_mode:
@@ -484,18 +471,20 @@ def run_placement_swap_job(
                     else:
                         os.environ["MOCK_HIGGSFIELD"] = prev_mock
 
-            result_path = Path((result.get("result") or {}).get("result_path") or "")
             if not result_path.is_file():
-                # Fallback: look under job dir
-                result_path = job_dir(job_id) / "result.mp4"
-            if not result_path.is_file():
-                raise RuntimeError("swap completed but result clip missing")
+                raise RuntimeError("frame swap completed but result clip missing")
 
             clip_key = f"placements/{placement_id}/clip.mp4"
             store.put_file(result_path, clip_key, content_type="video/mp4")
-            backend = (result.get("result") or {}).get("backend") or (
-                "mock" if test_mode else "seedance"
-            )
+            # Persist the edited still for debugging / brand review.
+            edited = Path(meta.get("edited_frame_path") or "")
+            if edited.is_file():
+                store.put_file(
+                    edited,
+                    f"placements/{placement_id}/edited_frame.jpg",
+                    content_type="image/jpeg",
+                )
+            backend = meta.get("backend") or ("mock" if test_mode else "seedance-i2v")
             updated = update_placement(
                 conn,
                 placement_id,

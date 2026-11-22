@@ -13,7 +13,6 @@ type Props = {
   videoUrl: string
   posterUrl?: string | null
   placements: PlacementWindow[]
-  title?: string
 }
 
 /**
@@ -21,18 +20,11 @@ type Props = {
  * window swap in a synced overlay <video>. Chosen over full-episode pre-stitch
  * because placements are per-brand; stitching would need one rendition per brand.
  */
-export function PlacementPlayer({
-  videoUrl,
-  posterUrl,
-  placements,
-  title,
-}: Props) {
+export function PlacementPlayer({ videoUrl, posterUrl, placements }: Props) {
   const mainRef = useRef<HTMLVideoElement>(null)
   const overlayRef = useRef<HTMLVideoElement>(null)
-  const boxRef = useRef<HTMLDivElement>(null)
   const [showPlaced, setShowPlaced] = useState(true)
-  const [activeId, setActiveId] = useState<string | null>(null)
-  const [showDebug, setShowDebug] = useState(false)
+  const activeClip = useRef<string | null>(null)
 
   useEffect(() => {
     const main = mainRef.current
@@ -49,15 +41,12 @@ export function PlacementPlayer({
       if (!hit || !hit.clip_url) {
         overlay.style.opacity = "0"
         if (!overlay.paused) overlay.pause()
-        setActiveId(null)
+        activeClip.current = null
       } else {
         const local = Math.max(0, t - hit.start_s)
-        if (overlay.dataset.clip !== hit.clip_url) {
-          overlay.dataset.clip = hit.clip_url
+        if (activeClip.current !== hit.clip_url) {
+          activeClip.current = hit.clip_url
           overlay.src = hit.clip_url
-          setActiveId(hit.id)
-        } else if (activeId !== hit.id) {
-          setActiveId(hit.id)
         }
         overlay.style.opacity = "1"
         if (Math.abs(overlay.currentTime - local) > 0.3) {
@@ -77,14 +66,11 @@ export function PlacementPlayer({
     }
     raf = window.requestAnimationFrame(tick)
     return () => window.cancelAnimationFrame(raf)
-  }, [placements, showPlaced, activeId])
+  }, [placements, showPlaced])
 
   return (
     <div className="relative w-full bg-black">
-      <div
-        ref={boxRef}
-        className="relative mx-auto aspect-video w-full max-w-[1400px] overflow-hidden bg-black"
-      >
+      <div className="relative aspect-video w-full overflow-hidden bg-black">
         <video
           ref={mainRef}
           className="absolute inset-0 h-full w-full object-contain"
@@ -101,37 +87,15 @@ export function PlacementPlayer({
           playsInline
           preload="auto"
         />
-        {title ? (
-          <div className="pointer-events-none absolute left-4 top-4 text-sm font-medium text-white/80 drop-shadow">
-            {title}
-          </div>
-        ) : null}
       </div>
 
       <button
         type="button"
-        aria-label="Toggle compare"
-        className="absolute bottom-3 right-3 rounded bg-black/50 px-2 py-1 text-[10px] uppercase tracking-wide text-white/40 opacity-30 hover:opacity-100"
-        onClick={() => setShowDebug((v) => !v)}
-      >
-        ·
-      </button>
-
-      {showDebug ? (
-        <div className="mx-auto flex max-w-[1400px] items-center gap-3 px-3 py-2 text-xs text-white/70">
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={showPlaced}
-              onChange={(e) => setShowPlaced(e.target.checked)}
-            />
-            Show placements
-          </label>
-          <span>
-            {placements.length} ready · active {activeId || "—"}
-          </span>
-        </div>
-      ) : null}
+        aria-label={showPlaced ? "Show original" : "Show placements"}
+        title={showPlaced ? "Showing placements — click for original" : "Showing original"}
+        className="absolute bottom-14 right-4 h-2 w-2 rounded-full bg-white/25 opacity-40 transition hover:opacity-90"
+        onClick={() => setShowPlaced((v) => !v)}
+      />
     </div>
   )
 }

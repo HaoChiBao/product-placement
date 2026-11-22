@@ -81,13 +81,19 @@ export function WatchClient({
               videoUrl={data.video_url}
               posterUrl={data.poster_url}
               placements={(data.placements || []).filter((p) => p.clip_url)}
-              title={data.episode.name}
             />
-            {data.title.attribution ? (
-              <p className="mt-3 text-xs text-zinc-500">
-                {data.title.attribution}
-              </p>
-            ) : null}
+            <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2 px-1">
+              <h1 className="text-base font-medium text-white">
+                {data.title.name}
+                <span className="ml-2 text-sm font-normal text-zinc-400">
+                  S{data.episode.season}E{data.episode.episode_number} ·{" "}
+                  {data.episode.name}
+                </span>
+              </h1>
+              {data.title.attribution ? (
+                <p className="text-xs text-zinc-500">{data.title.attribution}</p>
+              ) : null}
+            </div>
           </>
         )}
       </div>

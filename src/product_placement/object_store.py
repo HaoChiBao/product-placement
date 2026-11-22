@@ -25,11 +25,17 @@ def _s3_config() -> dict[str, str] | None:
     secret = (os.environ.get("AWS_SECRET_ACCESS_KEY") or "").strip()
     if not (bucket and key_id and secret):
         return None
+    # Prefer AWS_ENDPOINT_URL_S3 (boto3 convention); accept AWS_S3_ENDPOINT_URL too.
+    endpoint = (
+        os.environ.get("AWS_ENDPOINT_URL_S3")
+        or os.environ.get("AWS_S3_ENDPOINT_URL")
+        or ""
+    ).strip()
     return {
         "bucket": bucket,
         "access_key_id": key_id,
         "secret_access_key": secret,
-        "endpoint_url": (os.environ.get("AWS_ENDPOINT_URL_S3") or "").strip(),
+        "endpoint_url": endpoint,
         "region": (os.environ.get("AWS_DEFAULT_REGION") or "us-east-1").strip()
         or "us-east-1",
     }
@@ -130,6 +136,22 @@ class LocalObjectStore(ObjectStore):
         return "/api/media/" + quote(key.lstrip("/"), safe="/")
 
 
+def s3_addressing_style(endpoint_url: str | None = None) -> str:
+    """Railway buckets use virtual-host; MinIO/local usually need path style."""
+    explicit = (os.environ.get("AWS_S3_ADDRESSING_STYLE") or "").strip().lower()
+    if explicit in {"virtual", "path"}:
+        return explicit
+    ep = (
+        endpoint_url
+        or os.environ.get("AWS_ENDPOINT_URL_S3")
+        or os.environ.get("AWS_S3_ENDPOINT_URL")
+        or ""
+    ).lower()
+    if any(tok in ep for tok in ("localhost", "127.0.0.1", "0.0.0.0", "minio", ":9000")):
+        return "path"
+    return "virtual"
+
+
 class S3ObjectStore(ObjectStore):
     def __init__(self, cfg: dict[str, str]) -> None:
         import boto3
@@ -138,23 +160,25 @@ class S3ObjectStore(ObjectStore):
         self.bucket = cfg["bucket"]
         self.region = cfg["region"]
         endpoint = cfg.get("endpoint_url") or None
-        # Railway / S3-compatible often need virtual-host style.
+        style = s3_addressing_style(endpoint)
         client_kwargs: dict = {
             "service_name": "s3",
             "aws_access_key_id": cfg["access_key_id"],
             "aws_secret_access_key": cfg["secret_access_key"],
             "region_name": self.region,
-            "config": Config(s3={"addressing_style": "virtual"}),
+            "config": Config(s3={"addressing_style": style}),
         }
         if endpoint:
             client_kwargs["endpoint_url"] = endpoint
         self.client = boto3.client(**client_kwargs)
         self.endpoint_url = endpoint
+        self.addressing_style = style
         log.info(
-            "S3 object store bucket=%s region=%s endpoint=%s",
+            "S3 object store bucket=%s region=%s endpoint=%s style=%s",
             self.bucket,
             self.region,
             "set" if endpoint else "default",
+            style,
         )
 
     def put_file(

@@ -28,6 +28,20 @@ function contentTypeFor(key: string): string {
   )
 }
 
+function s3ForcePathStyle(): boolean {
+  const explicit = (process.env.AWS_S3_ADDRESSING_STYLE || "").trim().toLowerCase()
+  if (explicit === "path") return true
+  if (explicit === "virtual") return false
+  const ep = (process.env.AWS_ENDPOINT_URL_S3 || "").toLowerCase()
+  return (
+    ep.includes("localhost") ||
+    ep.includes("127.0.0.1") ||
+    ep.includes("0.0.0.0") ||
+    ep.includes("minio") ||
+    ep.includes(":9000")
+  )
+}
+
 async function s3Range(
   key: string,
   rangeHeader: string | null
@@ -38,7 +52,7 @@ async function s3Range(
   const client = new S3Client({
     region: process.env.AWS_DEFAULT_REGION || "us-east-1",
     endpoint: process.env.AWS_ENDPOINT_URL_S3 || undefined,
-    forcePathStyle: false,
+    forcePathStyle: s3ForcePathStyle(),
     credentials: {
       accessKeyId: process.env.AWS_ACCESS_KEY_ID || "",
       secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || "",

@@ -19,8 +19,12 @@ MAX_INPUT_S = 5.0
 FEATHER_SIGMA = 6.0
 DILATE_PX = 25
 
-# Seedance 720p: $0.3264 / s (from Higgsfield /estimate).
+# Seedance 720p video-edit / video-input modes (legacy crop-stitch path).
 SEEDANCE_USD_PER_S = 0.3264
+# Seedance 720p image-to-video (frame-based placement path).
+SEEDANCE_I2V_USD_PER_S = 0.2647
+# Qwen Image 3 Edit at 1k (frame edit before i2v).
+QWEN_EDIT_1K_USD = 0.04
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,14 @@ def estimate_seedance_cost_usd(duration_s: float) -> float:
 
     billed = max(1, int(math.ceil(max(0.0, float(duration_s)) - 1e-9)))
     return round(billed * SEEDANCE_USD_PER_S, 4)
+
+
+def estimate_frame_swap_cost_usd(duration_s: float) -> float:
+    """Qwen 1k edit + Seedance i2v at 720p for ceil(duration) seconds."""
+    import math
+
+    billed = max(1, int(math.ceil(max(0.0, float(duration_s)) - 1e-9)))
+    return round(QWEN_EDIT_1K_USD + billed * SEEDANCE_I2V_USD_PER_S, 4)
 
 
 def probe_video(path: str | Path) -> tuple[int, int, float, float]:

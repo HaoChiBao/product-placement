@@ -853,10 +853,24 @@ def seed_blender_open_movies(
                 suggest_status="queued",
             )
             created.append(ep)
+            # Promote first episode poster onto the title for catalog grids.
+            if ep.get("poster_key") and not title.get("poster_key"):
+                conn.execute(
+                    "UPDATE titles SET poster_key = ? WHERE id = ?",
+                    (ep["poster_key"], title["id"]),
+                )
+                conn.commit()
+                title["poster_key"] = ep["poster_key"]
 
+    titles_out = list_titles(conn)
     if own:
         conn.close()
-    return {"skipped": False, "episodes_created": len(created), "episodes": created}
+    return {
+        "skipped": False,
+        "episodes_created": len(created),
+        "episodes": created,
+        "titles": titles_out,
+    }
 
 
 def urlparse_path(url: str) -> str:
