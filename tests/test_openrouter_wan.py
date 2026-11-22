@@ -84,9 +84,11 @@ def test_clamp_window_centers_on_moment():
     assert end - start == pytest.approx(10)
 
 
-def test_choose_duration_prefers_longer_tie():
+def test_choose_duration_covers_the_clip():
     assert choose_duration(5, [4, 6, 8]) == 6
-    assert choose_duration(10.2, [2, 10, 15]) == 10
+    assert choose_duration(7.2, [5, 10]) == 10
+    assert choose_duration(10.2, [2, 10, 15]) == 15
+    assert choose_duration(40, [2, 10]) == 10
     assert choose_duration(3, None) == 3
 
 

@@ -83,7 +83,7 @@ def run_suggest_job(
     frames = out / "frames"
     frames.mkdir(parents=True, exist_ok=True)
     scanning = (
-        "Screening contact sheets"
+        "Finding swappable objects"
         if (os.environ.get("OPENROUTER_API_KEY") or "").strip()
         else "Scanning shots · faces · props"
     )
@@ -650,6 +650,9 @@ def run_placement_swap_job(
             }
             if meta.get("cost_usd") is not None:
                 fields["cost_usd"] = meta["cost_usd"]
+            if meta.get("start_s") is not None and meta.get("end_s") is not None:
+                fields["clip_start_s"] = float(meta["start_s"])
+                fields["clip_end_s"] = float(meta["end_s"])
             updated = update_placement(conn, placement_id, **fields)
             try:
                 from product_placement.catalog import refresh_campaign_for_placement

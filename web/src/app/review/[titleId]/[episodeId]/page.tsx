@@ -179,13 +179,15 @@ export default function ReviewPage() {
       const p = await decidePlacement(brandId, mm.id, status)
       setPlacements((ps) => ({ ...ps, [mm.id]: p }))
       if (status === "approved") {
-        const held = Boolean(p.error?.toLowerCase().includes("key missing"))
-        const higgsfield = Boolean(p.error?.toLowerCase().includes("higgsfield"))
+        const err = p.error?.toLowerCase() || ""
+        const held = err.includes("key missing")
         showToast(
           held
-            ? higgsfield
+            ? err.includes("higgsfield")
               ? "Queued — generation waiting on Higgsfield API key"
-              : "Queued — generation waiting on OpenRouter API key"
+              : err.includes("s3")
+                ? "Queued — generation waiting on S3"
+                : "Queued — generation waiting on OpenRouter API key"
             : "Placing your product in this moment…"
         )
         await saveCampaign({ brandId, episodeId, titleId, status: "in_progress" }).catch(() => {})
@@ -563,7 +565,9 @@ export default function ReviewPage() {
                     ? "Approving runs mock generation (MOCK_HIGGSFIELD is on)."
                     : gen.method === "higgsfield"
                       ? "Approving queues generation. Without a Higgsfield API key the placement stays queued — no fake clip is created."
-                      : "Approving queues generation. Without an OpenRouter API key the placement stays queued — no fake clip is created."}
+                      : (gen.reason || "").toLowerCase().includes("s3")
+                        ? "Approving queues generation. Without S3 the placement stays queued — no fake clip is created."
+                        : "Approving queues generation. Without an OpenRouter API key the placement stays queued — no fake clip is created."}
             </p>
           </div>
         </aside>

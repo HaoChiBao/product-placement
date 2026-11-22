@@ -1986,14 +1986,20 @@ def get_watch_payload(
     rows = fetchall_dicts(conn, sql, params)
     for r in rows:
         clip_key = r.get("clip_key")
+        start_s = r.get("clip_start_s")
+        end_s = r.get("clip_end_s")
+        if start_s is None:
+            start_s = r["start_s"]
+        if end_s is None:
+            end_s = r["end_s"]
         placements.append(
             {
                 "id": r["id"],
                 "brand_id": r["brand_id"],
                 "moment_id": r["moment_id"],
                 "status": r["status"],
-                "start_s": float(r["start_s"]),
-                "end_s": float(r["end_s"]),
+                "start_s": float(start_s),
+                "end_s": float(end_s),
                 "clip_key": clip_key,
                 "clip_url": store.public_or_presigned_url(clip_key) if clip_key else None,
                 "region": json.loads(r["region_json"]) if r.get("region_json") else None,
