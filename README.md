@@ -51,23 +51,24 @@ Frame-based placement (default): Qwen Image 3 Edit (~**$0.04**/1k image) + Seeda
 
 ## Web UI
 
-Three surfaces plus the original lab page:
+Brand-side flow (the only UI; the provider and watch APIs are unchanged):
 
 | Route | Role |
 |-------|------|
-| `/provider` | Upload titles/episodes; background `suggest` per episode |
-| `/brand` | Pick catalog episodes, review brand-fit moments, approve (test-mode mock swap by default) |
-| `/watch` · `/watch/<slug>/<season>-<episode>` | Netflix-like catalog + full-bleed player with synced placement overlays |
-| `/` | Original suggest → swap lab UI |
+| `/` | Your product: business name, website, product, optional product image |
+| `/research` | Brand research (TinyFish steps are mocked for now), then `POST /api/catalog/brands` |
+| `/videos` | Catalog episodes with their detected placement spots |
+| `/review/<titleId>/<episodeId>` | Time bar with every spot; approve (queues a test-mode swap) or reject each one |
+| `/campaigns` | Drafts (saved in the browser), in-progress and live placements |
 
-Playback uses an overlay `<video>` synced to `currentTime` during each ready placement window (per-brand placements; avoids pre-stitching a full episode per brand).
+Generating a placement needs a product image on the brand. Mock research data lives in `web/src/mock/research.example.ts`; copy it to `research.local.ts` (gitignored) for your own demo data.
 
 ```bash
 # local (Python package on PYTHONPATH / editable install + ffmpeg)
 cd web && npm install && npm run dev
 ```
 
-Open http://localhost:3000. Seed the Blender open-movie catalog from Provider/Watch, or:
+Open http://localhost:3000. Seed the Blender open-movie catalog with `POST /api/catalog/seed`, or:
 
 ```bash
 DATA_DIR=runs/ui python -m product_placement.catalog seed-blender
@@ -163,6 +164,6 @@ src/product_placement/
   …
 Dockerfile
 railway.toml
-web/               # Next.js: /provider /brand /watch + lab
+web/               # Next.js: brand flow UI + API routes
 scripts/seed_catalog.py
 ```
