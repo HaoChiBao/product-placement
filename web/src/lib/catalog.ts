@@ -4,6 +4,28 @@ import path from "path"
 
 import { dataRoot, pythonBin, pythonEnv, repoRoot, spawnJob } from "@/lib/runs"
 
+/** Parse CLI stdout; tolerate leading log lines if any leaked onto stdout. */
+function parseCatalogStdout(text: string, stderr: string): unknown {
+  const trimmed = text.trim()
+  if (!trimmed) return null
+  try {
+    return JSON.parse(trimmed)
+  } catch (first) {
+    const lines = trimmed.split(/\r?\n/)
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]
+      if (!line.startsWith("{") && !line.startsWith("[")) continue
+      try {
+        return JSON.parse(lines.slice(i).join("\n"))
+      } catch {
+        /* keep scanning */
+      }
+    }
+    const detail = (stderr || String(first)).trim().slice(-2000)
+    throw new Error(detail || "catalog stdout was not valid JSON")
+  }
+}
+
 export function catalogCmd(args: string[]): unknown {
   const res = spawnSync(pythonBin(), ["-m", "product_placement.catalog", ...args], {
     cwd: repoRoot(),
@@ -15,9 +37,7 @@ export function catalogCmd(args: string[]): unknown {
     const err = (res.stderr || res.stdout || "catalog command failed").trim()
     throw new Error(err.slice(-2000))
   }
-  const text = (res.stdout || "").trim()
-  if (!text) return null
-  return JSON.parse(text)
+  return parseCatalogStdout(res.stdout || "", res.stderr || "")
 }
 
 export function ensureCatalogDb(): void {
