@@ -30,6 +30,10 @@ Open http://localhost:$PORT (default **3000**). Railway injects `$PORT` automati
 | `MODEL_CACHE_DIR` | no | ONNX cache (default `/app/models` in the image) |
 | `REPO_ROOT` | no | Repo root for sample paths (default `/app`) |
 | `PYTHON_BIN` | no | Python executable (default `python3`; **not** the repo `.venv`) |
+| `DATABASE_URL` | no | Postgres URL (else SQLite at `$DATA_DIR/catalog.sqlite`) |
+| `AWS_S3_BUCKET_NAME` + `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | no | S3 (or S3-compatible) object store; else local `$DATA_DIR/objects/` |
+| `AWS_ENDPOINT_URL_S3` | no | Custom S3 endpoint (Railway bucket) |
+| `AWS_DEFAULT_REGION` | no | S3 region (default `us-east-1`) |
 
 Auth is resolved by `product_placement.higgsfield.auth_header`: prefer `HF_KEY`, else `HF_API_KEY_ID` + `HF_API_KEY_SECRET`.
 
@@ -43,18 +47,33 @@ Auth is resolved by `product_placement.higgsfield.auth_header`: prefer `HF_KEY`,
 
 ### Cost gate
 
-Seedance 2.5 at 720p is about **$0.3264/s** (~**$1.63** per 5 s). The UI shows the estimate and requires an explicit confirm click. The server rejects swap windows over **5 s** and resolutions other than **720p**. Long jobs are async: `POST /api/jobs/suggest|swap` then poll `GET /api/jobs/:id`.
+Frame-based placement (default): Qwen Image 3 Edit (~**$0.04**/1k image) + Seedance 2.5 image-to-video at 720p (**$0.2647/s** → ~**$1.32**/5 s) ≈ **$1.36** per 5 s clip. The UI shows the estimate and requires an explicit confirm click. The server rejects swap windows over **5 s** and resolutions other than **720p**. Long jobs are async: `POST /api/jobs/suggest|swap` then poll `GET /api/jobs/:id`.
 
 ## Web UI
 
-Cult UI / Next.js page: upload → suggest moments → pick one → product image → confirm cost → crop-and-stitch Seedance swap → side-by-side play + download.
+Three surfaces plus the original lab page:
+
+| Route | Role |
+|-------|------|
+| `/provider` | Upload titles/episodes; background `suggest` per episode |
+| `/brand` | Pick catalog episodes, review brand-fit moments, approve (test-mode mock swap by default) |
+| `/watch` · `/watch/<slug>/<season>-<episode>` | Netflix-like catalog + full-bleed player with synced placement overlays |
+| `/` | Original suggest → swap lab UI |
+
+Playback uses an overlay `<video>` synced to `currentTime` during each ready placement window (per-brand placements; avoids pre-stitching a full episode per brand).
 
 ```bash
 # local (Python package on PYTHONPATH / editable install + ffmpeg)
 cd web && npm install && npm run dev
 ```
 
-Open http://localhost:3000. API routes spawn `python3 -m product_placement.jobs …` (uses `PYTHON_BIN` if set; falls back to repo `.venv` only in non-production).
+Open http://localhost:3000. Seed the Blender open-movie catalog from Provider/Watch, or:
+
+```bash
+DATA_DIR=runs/ui python -m product_placement.catalog seed-blender
+```
+
+API routes spawn `python3 -m product_placement.jobs …` (uses `PYTHON_BIN` if set; falls back to repo `.venv` only in non-production).
 
 ## Suggest (pre-swap)
 
@@ -69,15 +88,16 @@ python -m product_placement suggest \
 
 ONNX weights download on first run into `checkpoints/`, `MODEL_CACHE_DIR`, or `~/.cache/product-placement/models/` (OpenCV Zoo YuNet + YOLOX-S).
 
-## Swap (crop-and-stitch)
+## Swap (frame → edit → image-to-video)
 
-Hosted path used by the UI:
+Hosted path used by the UI and catalog placements:
 
-1. Cut the moment window (≤5 s)
-2. Crop the face-free bbox → upscale to **1280×720**
-3. Hold the last frame to **≈4.96 s** (avoids Higgsfield `ceil` billing a 6th second)
-4. Seedance 2.5 video-edit at 720p (or mock overlay when `MOCK_HIGGSFIELD=1`)
-5. Feather-stitch the edit back into the moment; keep original audio when present
+1. Extract a full-res frame at the moment start (`ffmpeg`, exact timestamp)
+2. Edit that frame so the brand product appears in the moment bbox — Higgsfield **Qwen Image 3 Edit** (`POST /alibaba/qwen-image-3/edit`) with the product asset as a second reference (mock: local OpenCV paste)
+3. Animate with **Seedance 2.5 image-to-video** (`POST /bytedance/seedance-2.5/image-to-video`) at the moment duration (clamped 4–30 s) and source resolution tier (mock: hold the edited frame as H.264)
+4. The returned clip is what the watch overlay plays
+
+`MOCK_HIGGSFIELD=1` / `testMode=true` still runs real frame extraction; only the paid API calls are mocked. `confirm=true` is required for both mock and paid paths.
 
 CLI full-clip swap (unchanged backends):
 
@@ -132,18 +152,17 @@ pytest -q
 ```
 src/product_placement/
   suggest.py       # suggest(video) -> moments
+  catalog.py       # titles/episodes/moments/brands/placements + seed CLI
+  db.py            # Postgres or SQLite
+  object_store.py  # S3 or local objects/
   vision.py
   models_store.py  # ONNX download/cache
   crop_stitch.py   # crop → hold ≈5s → feather stitch (+ mock edit)
-  jobs.py          # async suggest/swap workers (status.json on disk)
+  jobs.py          # suggest/swap + episode-suggest/placement-swap
   backends.py
-  audio.py
-  higgsfield.py
-  prepare.py
-  pipeline.py
-  cli.py
-  eval.py
+  …
 Dockerfile
 railway.toml
-web/               # Next.js UI + job APIs
+web/               # Next.js: /provider /brand /watch + lab
+scripts/seed_catalog.py
 ```
