@@ -38,7 +38,7 @@ Auth is resolved by `product_placement.higgsfield.auth_header`: prefer `HF_KEY`,
 - Builder: Dockerfile (`railway.toml` / `railway.json`).
 - Health check: `GET /api/health`.
 - Memory: **≥2 GB** (4 GB recommended) — OpenCV + ffmpeg + Next under load.
-- Volume (optional): mount persistent storage at `/data` if you want uploads/results to survive restarts; ephemeral disk is fine for a prototype.
+- Volume (optional): attach a **Railway Volume** mounted at `/data` if you want uploads/results to survive restarts. The image creates `/data` itself; do not use a Dockerfile `VOLUME` instruction (Railway rejects it). Ephemeral disk is fine for a prototype.
 - Do **not** commit ONNX weights; the image fetches them at build time.
 
 ### Cost gate

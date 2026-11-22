@@ -60,7 +60,8 @@ ENV REPO_ROOT=/app \
     MOCK_HIGGSFIELD=0
 
 EXPOSE 3000
-VOLUME ["/data"]
+# Do not use Dockerfile VOLUME — Railway rejects it. Mount a Railway Volume at
+# /data in the dashboard if you want persistence; otherwise /data is ephemeral.
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD curl -fsS "http://127.0.0.1:${PORT}/api/health" || exit 1
