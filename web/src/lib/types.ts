@@ -74,8 +74,15 @@ export type JobStatus = {
 /** Seedance 720p list price from Higgsfield /estimate. */
 export const SEEDANCE_USD_PER_S = 0.3264
 export const MAX_SWAP_INPUT_S = 5
+/** OpenRouter Wan 3.0 720p, measured about $1.20 per 10s. */
+export const WAN_720P_USD_PER_10S = 1.2
 
 export function estimateSwapCostUsd(durationS: number): number {
   const billed = Math.max(1, Math.ceil(Math.max(0, durationS) - 1e-9))
   return Math.round(billed * SEEDANCE_USD_PER_S * 10000) / 10000
+}
+
+export function estimateWanSwapCostUsd(durationS: number): number {
+  const seconds = Math.max(1, Math.round(Math.max(0, durationS)))
+  return Math.round((seconds / 10) * WAN_720P_USD_PER_10S * 10000) / 10000
 }

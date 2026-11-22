@@ -23,19 +23,20 @@ Open http://localhost:$PORT (default **3000**). Railway injects `$PORT` automati
 | Variable | Required | Purpose |
 |----------|----------|---------|
 | `PORT` | yes (Railway sets it) | HTTP listen port |
-| `HF_KEY` | for live swaps | Higgsfield key as `ID:SECRET` |
+| `OPENROUTER_API_KEY` | for the default live swap | Wan 3.0 object swap. When set, suggest also uses the Jev finder; unset keeps classical CV |
+| `SWAP_METHOD` | no | `wan` (default) or `higgsfield` (frame edit + Seedance fallback) |
+| `HF_KEY` | for `SWAP_METHOD=higgsfield` | Higgsfield key as `ID:SECRET` |
 | `HF_API_KEY_ID` + `HF_API_KEY_SECRET` | alt to `HF_KEY` | Same auth; both required if `HF_KEY` unset |
-| `MOCK_HIGGSFIELD` | no | `1`/`true` → unpaid mock edit (product overlay) for UI tests |
+| `MOCK_HIGGSFIELD` | no | `1`/`true` → unpaid mock edit (product overlay) for UI tests. Does not call Wan |
 | `DATA_DIR` | no | Job/upload/output root (default `/data`) |
 | `MODEL_CACHE_DIR` | no | ONNX cache (default `/app/models` in the image) |
 | `REPO_ROOT` | no | Repo root for sample paths (default `/app`) |
 | `PYTHON_BIN` | no | Python executable (default `python3`; **not** the repo `.venv`) |
 | `DATABASE_URL` | no | Postgres URL (else SQLite at `$DATA_DIR/catalog.sqlite`) |
-| `AWS_S3_BUCKET_NAME` + `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | no | S3 (or S3-compatible) object store; else local `$DATA_DIR/objects/` |
+| `AWS_S3_BUCKET_NAME` + `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | for Wan swaps | S3 presigned GET URLs for the clip and brand asset. Other features fall back to local files |
 | `AWS_ENDPOINT_URL_S3` | no | Custom S3 endpoint (Railway bucket) |
 | `AWS_DEFAULT_REGION` | no | S3 region (default `us-east-1`) |
-| `OPENROUTER_API_KEY` | no | When set, suggest uses Jev on OpenRouter. Unset keeps the classical CV finder |
-| `MOMENT_MODEL` | no | OpenRouter model (default `typesafe/jev-router`) |
+| `MOMENT_MODEL` | no | OpenRouter model for moment finding (default `typesafe/jev-router`) |
 | `TINYFISH_API_KEY` | no | TinyFish key for `/research`: web search, page fetch and one paid agent run (~$0.016/step) per brand; without it the research page falls back to the mock |
 
 Auth is resolved by `product_placement.higgsfield.auth_header`: prefer `HF_KEY`, else `HF_API_KEY_ID` + `HF_API_KEY_SECRET`.
@@ -101,16 +102,16 @@ python -m product_placement suggest \
   --out-dir runs/suggest
 ```
 
-## Swap (frame → edit → image-to-video)
+## Swap
 
-Hosted path used by the UI and catalog placements:
+The hosted UI and catalog placements default to a full-clip edit on OpenRouter **Alibaba Wan 3.0** (`POST /api/v1/videos`, model `alibaba/wan-3.0`):
 
-1. Extract a full-res frame at the moment start (`ffmpeg`, exact timestamp)
-2. Edit that frame so the brand product appears in the moment bbox — Higgsfield **Qwen Image 3 Edit** (`POST /alibaba/qwen-image-3/edit`) with the product asset as a second reference (mock: local OpenCV paste)
-3. Animate with **Seedance 2.5 image-to-video** (`POST /bytedance/seedance-2.5/image-to-video`) at the moment duration (clamped 4–30 s) and source resolution tier (mock: hold the edited frame as H.264)
-4. The returned clip is what the watch overlay plays
+1. Clamp the moment window to the model max duration from `GET /api/v1/videos/models` (centered on the moment).
+2. Upload that clip and the brand asset to S3 and pass presigned https GET URLs (`input_references`).
+3. Poll `GET /api/v1/videos/{id}` in the background job, download `unsigned_urls`, mux the original audio, store the clip like any other placement.
+4. Record `usage.cost`.
 
-`MOCK_HIGGSFIELD=1` / `testMode=true` still runs real frame extraction; only the paid API calls are mocked. `confirm=true` is required for both mock and paid paths.
+`SWAP_METHOD=higgsfield` keeps the previous frame path (Qwen Image 3 Edit, then Seedance 2.5 image-to-video). `MOCK_HIGGSFIELD=1` / `testMode=true` still runs that mock (real frame extract, local paste, no paid call) and does not call Wan. `confirm=true` is required for both mock and paid paths. Wan needs S3; data URLs are rejected by OpenRouter.
 
 CLI full-clip swap (unchanged backends):
 

@@ -5,7 +5,7 @@ import {
   ensureCatalogDb,
   spawnPlacementSwap,
 } from "@/lib/catalog"
-import { planGeneration } from "@/lib/generation"
+import { planGeneration, resolveSwapMethod } from "@/lib/generation"
 
 export const runtime = "nodejs"
 export const maxDuration = 60
@@ -37,6 +37,7 @@ export async function POST(req: NextRequest) {
       status?: string
       testMode?: boolean
       confirm?: boolean
+      method?: string
     }
     if (!body.brandId || !body.momentId || !body.status) {
       return NextResponse.json(
@@ -45,7 +46,10 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    const plan = planGeneration({ testMode: body.testMode })
+    const plan = planGeneration({
+      testMode: body.testMode,
+      method: resolveSwapMethod(body.method),
+    })
     if (body.status === "approved" && !plan.testMode && !body.confirm) {
       return NextResponse.json(
         {
@@ -88,6 +92,7 @@ export async function POST(req: NextRequest) {
         spawnPlacementSwap(placement.id, {
           testMode: plan.testMode,
           confirm: true,
+          method: plan.method,
         })
       }
     }
