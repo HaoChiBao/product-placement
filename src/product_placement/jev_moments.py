@@ -362,16 +362,16 @@ def track_window(
 
 
 def _dedupe_frame(hits: list[Hit]) -> list[Hit]:
-    keep: list[Hit] = []
-    for hit in hits:
-        category = normalize_category(hit.category)
-        if category == "plate" and any(
-            normalize_category(prev.category) == "plate" and _containment(prev.box, hit.box) > 0.8
-            for prev in keep
-        ):
+    """Drop a plate or food box that sits inside a larger one, whatever the model lists first."""
+    plates = [hit for hit in hits if normalize_category(hit.category) == "plate"]
+    dropped: set[int] = set()
+    kept: list[Hit] = []
+    for hit in sorted(plates, key=lambda item: item.box.area, reverse=True):
+        if any(_containment(prev.box, hit.box) > 0.8 for prev in kept):
+            dropped.add(id(hit))
             continue
-        keep.append(hit)
-    return keep
+        kept.append(hit)
+    return [hit for hit in hits if id(hit) not in dropped]
 
 
 def _dedupe_hits(hits: list[Hit]) -> list[Hit]:

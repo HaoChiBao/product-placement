@@ -318,6 +318,33 @@ def test_suits_tracks_use_category_overlap_and_shot_midpoints():
     assert plate_track.sightings == 1
 
 
+def test_inner_food_is_dropped_when_listed_before_its_plate():
+    plate = _xyxy([557, 723, 929, 851])
+    steak = _xyxy([600, 750, 800, 820])
+    hits = [
+        _hit(
+            shot_i=0,
+            time_s=1.0,
+            label="steak",
+            category="food",
+            visibility=0.9,
+            box=steak,
+            key=0,
+        ),
+        _hit(
+            shot_i=0,
+            time_s=1.0,
+            label="plate with steak",
+            category="plate",
+            visibility=0.7,
+            box=plate,
+            key=1,
+        ),
+    ]
+    tracks = merge_hits(hits, [(0.0, 2.0)], [[0.15, 1.0, 1.85]])
+    assert [track.label for track in tracks] == ["plate with steak"]
+
+
 def test_track_window_uses_shot_edges_and_midpoints():
     frames = [2.152, 2.982, 3.812]
     assert track_window([2.152, 3.812], frames, 2.002, 3.962) == (2.002, 3.962)
