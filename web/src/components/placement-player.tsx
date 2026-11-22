@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react"
 
+import { cn } from "@/lib/utils"
+
 export type PlacementWindow = {
   id: string
   start_s: number
@@ -70,8 +72,8 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements }: Props) {
   }, [placements, showPlaced])
 
   return (
-    <div className="watch-player-shell">
-      <div className="watch-player-frame">
+    <div className="relative overflow-hidden rounded-md border border-border bg-black shadow-soft">
+      <div className="relative aspect-video bg-black">
         <video
           ref={mainRef}
           src={videoUrl}
@@ -79,10 +81,11 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements }: Props) {
           controls
           playsInline
           preload="metadata"
+          className="absolute inset-0 h-full w-full object-contain"
         />
         <video
           ref={overlayRef}
-          className="watch-overlay-vid"
+          className="pointer-events-none absolute inset-0 h-full w-full object-contain opacity-0 transition-opacity duration-150"
           muted
           playsInline
           preload="auto"
@@ -92,7 +95,11 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements }: Props) {
       {readyCount > 0 ? (
         <button
           type="button"
-          className="watch-place-toggle"
+          className={cn(
+            "absolute bottom-14 right-3.5 z-[4] inline-flex items-center gap-2 rounded-full border border-white/18 bg-black/78 px-3 py-2 text-[12.5px] font-medium text-white backdrop-blur-sm transition-colors duration-150",
+            "hover:bg-black/92",
+            showPlaced && "border-accent/55"
+          )}
           aria-pressed={showPlaced}
           aria-label={
             showPlaced
@@ -101,7 +108,13 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements }: Props) {
           }
           onClick={() => setShowPlaced((v) => !v)}
         >
-          <span className="watch-place-dot" aria-hidden />
+          <span
+            className={cn(
+              "size-2 rounded-full bg-faint",
+              showPlaced && "bg-accent shadow-[0_0_0_3px_rgba(61,214,127,0.25)]"
+            )}
+            aria-hidden
+          />
           {showPlaced ? "Placements on" : "Original"}
         </button>
       ) : null}
