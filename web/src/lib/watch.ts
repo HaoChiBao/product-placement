@@ -1,4 +1,4 @@
-import type { Episode, Title } from "@/lib/catalog-client"
+import type { Episode, Title, VideoSource } from "@/lib/catalog-client"
 import { mediaUrl } from "@/lib/catalog-client"
 
 export type WatchTitle = Title
@@ -29,11 +29,13 @@ export function posterFor(title: Title, ep?: Episode | null) {
   return mediaUrl(title.poster_key) || mediaUrl(ep?.poster_key) || null
 }
 
-export async function loadWatchCatalog(): Promise<{
+export async function loadWatchCatalog(source?: VideoSource | null): Promise<{
   titles: Title[]
   episodes: Record<string, Episode[]>
 }> {
-  const res = await fetch("/api/catalog/titles?watchable=1")
+  const q = new URLSearchParams({ watchable: "1" })
+  if (source) q.set("source", source)
+  const res = await fetch(`/api/catalog/titles?${q}`)
   const data = await res.json()
   if (!res.ok) throw new Error(data.error || "failed to load catalog")
   const list = (data.titles || []) as Title[]

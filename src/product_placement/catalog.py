@@ -150,24 +150,49 @@ def episode_is_watchable(ep: dict[str, Any] | None) -> bool:
 # Titles
 # ---------------------------------------------------------------------------
 
+TITLE_SOURCES = ("test", "hosted")
+VIDEO_SOURCE_CHOICES = ("test", "hosted", "all")
+
+
+def resolve_video_source(source: str | None = None) -> str:
+    raw = (source if source is not None else os.environ.get("VIDEO_SOURCE") or "all")
+    raw = str(raw).strip().lower()
+    return raw if raw in VIDEO_SOURCE_CHOICES else "all"
+
 
 def list_titles(
-    conn: Connection, *, watchable_only: bool = False
+    conn: Connection,
+    *,
+    watchable_only: bool = False,
+    source: str | None = None,
 ) -> list[dict[str, Any]]:
-    if not watchable_only:
-        return fetchall_dicts(conn, "SELECT * FROM titles ORDER BY created_at")
-    # Ready-to-watch only: catalog original present, never processing/failed or movies/.
-    # Bind the LIKE pattern — a literal 'movies/%' breaks psycopg ( % is not %% / %s ).
-    return fetchall_dicts(
-        conn,
-        "SELECT DISTINCT t.* FROM titles t "
-        "INNER JOIN episodes e ON e.title_id = t.id "
-        "WHERE e.video_key IS NOT NULL AND TRIM(e.video_key) != '' "
-        "AND e.video_key NOT LIKE ? "
-        "AND LOWER(COALESCE(e.suggest_status, '')) NOT IN ('processing', 'failed') "
-        "ORDER BY t.created_at",
-        (f"{MOVIES_PREFIX}%",),
-    )
+    src = resolve_video_source(source)
+    params: list[Any] = []
+    where: list[str] = []
+    if src in TITLE_SOURCES:
+        where.append("t.source = ?")
+        params.append(src)
+    if watchable_only:
+        # Ready-to-watch only: catalog original present, never processing/failed or movies/.
+        # Bind the LIKE pattern — a literal 'movies/%' breaks psycopg ( % is not %% / %s ).
+        where.extend(
+            [
+                "e.video_key IS NOT NULL AND TRIM(e.video_key) != ''",
+                "e.video_key NOT LIKE ?",
+                "LOWER(COALESCE(e.suggest_status, '')) NOT IN ('processing', 'failed')",
+            ]
+        )
+        params.append(f"{MOVIES_PREFIX}%")
+        sql = (
+            "SELECT DISTINCT t.* FROM titles t "
+            "INNER JOIN episodes e ON e.title_id = t.id"
+        )
+    else:
+        sql = "SELECT t.* FROM titles t"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY t.created_at"
+    return fetchall_dicts(conn, sql, tuple(params) if params else None)
 
 
 def get_title(
@@ -190,6 +215,7 @@ def create_title(
     poster_key: str | None = None,
     slug: str | None = None,
     title_id: str | None = None,
+    source: str = "test",
 ) -> dict[str, Any]:
     tid = title_id or new_id()
     slug_val = slug or slugify(name)
@@ -200,10 +226,11 @@ def create_title(
         slug_val = f"{base}-{n}"
         n += 1
     now = utc_now()
+    source_val = source if source in TITLE_SOURCES else "test"
     conn.execute(
-        "INSERT INTO titles (id, kind, name, slug, synopsis, poster_key, attribution, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (tid, kind, name, slug_val, synopsis, poster_key, attribution, now),
+        "INSERT INTO titles (id, kind, name, slug, synopsis, poster_key, attribution, source, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (tid, kind, name, slug_val, synopsis, poster_key, attribution, source_val, now),
     )
     conn.commit()
     return get_title(conn, id=tid)  # type: ignore[return-value]
@@ -1193,6 +1220,7 @@ def import_movies_from_store(
                     kind="movie",
                     slug=slug,
                     synopsis=f"Imported from {key}",
+                    source="hosted",
                 )
             if prior and status in {"processing", "failed"}:
                 ep = prior
@@ -2112,6 +2140,7 @@ def seed_blender_open_movies(
                 synopsis=src["synopsis"],
                 attribution=ATTRIBUTION_BLENDER,
                 slug=src["slug"],
+                source="test",
             )
             seed_log("created title %s", src["slug"])
 
@@ -2233,6 +2262,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only titles with at least one ready (playable) episode",
     )
+    lt.add_argument(
+        "--source",
+        choices=VIDEO_SOURCE_CHOICES,
+        default=None,
+        help="Filter by title source (default: VIDEO_SOURCE env or all)",
+    )
 
     gt = add("get-title")
     gt.add_argument("--id", default=None)
@@ -2243,6 +2278,12 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("--kind", default="movie")
     ct.add_argument("--synopsis", default="")
     ct.add_argument("--attribution", default="")
+    ct.add_argument(
+        "--source",
+        choices=TITLE_SOURCES,
+        default="test",
+        help="Title source: test (seed/demo) or hosted (movies/ import)",
+    )
 
     le = add("list-episodes")
     le.add_argument("--title-id", required=True)
@@ -2352,7 +2393,13 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         if args.command == "list-titles":
-            _print_json(list_titles(conn, watchable_only=bool(args.watchable)))
+            _print_json(
+                list_titles(
+                    conn,
+                    watchable_only=bool(args.watchable),
+                    source=args.source,
+                )
+            )
             return
 
         if args.command == "get-title":
@@ -2370,6 +2417,7 @@ def main(argv: list[str] | None = None) -> None:
                     kind=args.kind,
                     synopsis=args.synopsis,
                     attribution=args.attribution,
+                    source=args.source,
                 )
             )
             return

@@ -5,11 +5,24 @@ import { catalogCmd, ensureCatalogDb } from "@/lib/catalog"
 export const runtime = "nodejs"
 export const maxDuration = 60
 
+function resolveSource(raw: string | null): "test" | "hosted" | "all" {
+  const fromQuery = (raw || "").trim().toLowerCase()
+  if (fromQuery === "test" || fromQuery === "hosted" || fromQuery === "all") {
+    return fromQuery
+  }
+  const fromEnv = (process.env.VIDEO_SOURCE || "all").trim().toLowerCase()
+  if (fromEnv === "test" || fromEnv === "hosted" || fromEnv === "all") {
+    return fromEnv
+  }
+  return "all"
+}
+
 export async function GET(req: NextRequest) {
   try {
     ensureCatalogDb()
     const all = req.nextUrl.searchParams.get("all")
     const watchable = req.nextUrl.searchParams.get("watchable")
+    const source = resolveSource(req.nextUrl.searchParams.get("source"))
     const args = ["list-titles"]
     // Default: only titles with a ready/playable episode. Opt out with ?all=1.
     const wantAll = all === "1" || all === "true"
@@ -18,6 +31,7 @@ export async function GET(req: NextRequest) {
     if (wantWatchable) {
       args.push("--watchable")
     }
+    args.push("--source", source)
     const titles = catalogCmd(args)
     return NextResponse.json({ titles })
   } catch (err) {
@@ -34,10 +48,13 @@ export async function POST(req: NextRequest) {
       kind?: string
       synopsis?: string
       attribution?: string
+      source?: string
     }
     if (!body.name?.trim()) {
       return NextResponse.json({ error: "name required" }, { status: 400 })
     }
+    const source =
+      body.source === "hosted" || body.source === "test" ? body.source : "test"
     const title = catalogCmd([
       "create-title",
       "--name",
@@ -48,6 +65,8 @@ export async function POST(req: NextRequest) {
       body.synopsis || "",
       "--attribution",
       body.attribution || "",
+      "--source",
+      source,
     ])
     return NextResponse.json(title)
   } catch (err) {

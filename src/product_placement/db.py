@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS titles (
     synopsis TEXT,
     poster_key TEXT,
     attribution TEXT,
+    source TEXT DEFAULT 'test',
     created_at TEXT
 );
 
@@ -215,7 +216,21 @@ CREATE TABLE IF NOT EXISTS placements (
 def init_schema(conn: Connection) -> None:
     conn.executescript(_SCHEMA)
     _ensure_column(conn, "episodes", "import_attempts", "INT DEFAULT 0")
+    _ensure_column(conn, "titles", "source", "TEXT DEFAULT 'test'")
+    _backfill_title_source(conn)
     conn.commit()
+
+
+def _backfill_title_source(conn: Connection) -> None:
+    """Imported movies/ titles → hosted; everything else → test."""
+    conn.execute(
+        "UPDATE titles SET source = ? WHERE synopsis LIKE ?",
+        ("hosted", "Imported from movies/%"),
+    )
+    conn.execute(
+        "UPDATE titles SET source = ? WHERE source IS NULL OR TRIM(source) = ''",
+        ("test",),
+    )
 
 
 def _ensure_column(conn: Connection, table: str, column: str, decl: str) -> None:
