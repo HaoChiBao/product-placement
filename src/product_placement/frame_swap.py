@@ -24,6 +24,7 @@ import cv2
 import numpy as np
 
 from product_placement.crop_stitch import (
+    MAX_INPUT_S,
     QWEN_EDIT_1K_USD,
     SEEDANCE_I2V_USD_PER_S,
     estimate_frame_swap_cost_usd,
@@ -226,6 +227,10 @@ def run_frame_swap(
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     duration_s = max(0.1, float(end_s) - float(start_s))
+    if duration_s > MAX_INPUT_S + 1e-3:
+        raise ValueError(
+            f"input window {duration_s:.3f}s exceeds max {MAX_INPUT_S}s"
+        )
     i2v_duration = clamp_i2v_duration(duration_s)
     estimated = estimate_frame_swap_cost_usd(float(i2v_duration))
 

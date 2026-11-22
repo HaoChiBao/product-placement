@@ -454,7 +454,18 @@ def run_placement_swap_job(
             region = json.loads(moment["region_json"] or "{}")
             target = moment.get("whats_there") or "object"
 
+            from product_placement.crop_stitch import MAX_INPUT_S
             from product_placement.frame_swap import run_frame_swap
+
+            start_s = float(moment["start_s"])
+            end_s = float(moment["end_s"])
+            duration = end_s - start_s
+            if duration <= 0:
+                raise ValueError("moment end_s must be greater than start_s")
+            if duration > MAX_INPUT_S + 1e-3:
+                raise ValueError(
+                    f"input window {duration:.3f}s exceeds max {MAX_INPUT_S}s"
+                )
 
             work = tmp_path / "frame_swap"
             result_path = work / "clip.mp4"
@@ -466,8 +477,8 @@ def run_placement_swap_job(
                 meta = run_frame_swap(
                     video_path=video_path,
                     product_path=product_path,
-                    start_s=float(moment["start_s"]),
-                    end_s=float(moment["end_s"]),
+                    start_s=start_s,
+                    end_s=end_s,
                     region=region,
                     target=target,
                     out_path=result_path,

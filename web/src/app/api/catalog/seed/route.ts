@@ -11,13 +11,18 @@ export async function POST() {
     const result = catalogCmd(["seed-blender"]) as {
       titles?: unknown
       episodes?: { id: string; suggest_status?: string }[]
+      suggest_queue?: { id: string; suggest_status?: string }[]
       skipped?: boolean
     }
-    if (!result.skipped) {
-      for (const ep of result.episodes || []) {
-        if (!ep.suggest_status || ep.suggest_status === "queued") {
-          spawnEpisodeSuggest(ep.id)
-        }
+    // Always drain suggest queue — boot seed can create episodes without
+    // spawning jobs, and a later seed call must still kick them off.
+    const queue = result.suggest_queue?.length
+      ? result.suggest_queue
+      : result.episodes || []
+    for (const ep of queue) {
+      const st = (ep.suggest_status || "queued").toLowerCase()
+      if (st === "queued" || st === "failed" || !ep.suggest_status) {
+        spawnEpisodeSuggest(ep.id)
       }
     }
     return NextResponse.json(result)

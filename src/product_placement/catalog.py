@@ -872,14 +872,23 @@ def seed_blender_open_movies(
                 title["poster_key"] = ep["poster_key"]
 
     titles_out = list_titles(conn)
+    # Episodes still waiting for suggest (boot seed / partial retry).
+    need_suggest = fetchall_dicts(
+        conn,
+        "SELECT * FROM episodes WHERE suggest_status IN ('queued', 'failed') "
+        "OR suggest_status IS NULL OR suggest_status = '' "
+        "ORDER BY created_at",
+    )
     if own:
         conn.close()
     return {
-        # True only when nothing new was added (API can skip suggest spawn).
+        # True only when nothing new was added.
         "skipped": len(created) == 0,
         "reason": "all episodes already present" if not created else None,
         "episodes_created": len(created),
-        "episodes": created,
+        # Newly created first; callers also get the full suggest queue.
+        "episodes": created or need_suggest,
+        "suggest_queue": need_suggest,
         "titles": titles_out,
         "skipped_existing": skipped_existing,
     }

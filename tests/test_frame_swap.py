@@ -190,6 +190,25 @@ def test_frame_swap_requires_confirm(tmp_path: Path):
         )
 
 
+def test_frame_swap_rejects_over_five_seconds(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("MOCK_HIGGSFIELD", "1")
+    video = _make_test_video(tmp_path / "src.mp4")
+    product = _make_product(tmp_path / "product.png")
+    with pytest.raises(ValueError, match="exceeds max"):
+        run_frame_swap(
+            video_path=video,
+            product_path=product,
+            start_s=0.0,
+            end_s=8.0,
+            region={"x": 10, "y": 10, "w": 20, "h": 20},
+            target="x",
+            out_path=tmp_path / "o.mp4",
+            work_dir=tmp_path / "w",
+            confirm=True,
+            test_mode=True,
+        )
+
+
 def _transport(handler):
     return httpx.MockTransport(handler)
 
