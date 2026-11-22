@@ -162,7 +162,6 @@ export function BrandsPanel({
               className="min-h-[160px]"
             />
             {assets[0] && (
-              // eslint-disable-next-line @next/next/no-img-element
               <img
                 src={URL.createObjectURL(assets[0])}
                 alt="Product preview"

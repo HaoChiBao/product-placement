@@ -91,8 +91,8 @@ export function SuggestApp() {
     if (brand?.assets?.[0]) {
       setProductPath("")
       setProductFile(null)
-    } else if (!productPath) {
-      setProductPath("assets/samples/soda_can.png")
+    } else {
+      setProductPath((p) => p || "assets/samples/soda_can.png")
     }
   }, [brand])
 
@@ -383,7 +383,6 @@ export function SuggestApp() {
                   Using brand asset{" "}
                   <span className="font-mono">{brand.assets[0]}</span> from{" "}
                   <strong>{brand.name}</strong>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img
                     src={`/api/brands/${brand.id}/assets/${encodeURIComponent(brand.assets[0])}`}
                     alt={brand.name}
