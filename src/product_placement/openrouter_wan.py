@@ -89,14 +89,21 @@ def clamp_window(
 
 
 def choose_duration(seconds: float, supported: list[int] | None) -> int:
-    """Nearest allowed duration. Ties prefer the longer value so the moment fits."""
-    target = int(round(max(0.0, float(seconds))))
+    """Shortest allowed duration that still covers the clip.
+
+    A shorter Wan output is cut further by mux (`-shortest`), so the stored
+    clip would end before the moment.
+    """
+    import math
+
+    need = max(1, int(math.ceil(max(0.0, float(seconds)) - 1e-9)))
     if supported:
         options = sorted({int(d) for d in supported})
         if not options:
             raise ValueError("supported durations empty")
-        return min(options, key=lambda d: (abs(d - target), -d))
-    return max(2, min(30, max(2, target)))
+        covering = [d for d in options if d >= need]
+        return covering[0] if covering else options[-1]
+    return max(2, min(30, max(2, need)))
 
 
 def nearest_aspect(

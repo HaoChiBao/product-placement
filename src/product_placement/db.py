@@ -208,6 +208,8 @@ CREATE TABLE IF NOT EXISTS placements (
     test_mode INT,
     backend TEXT,
     cost_usd REAL,
+    clip_start_s REAL,
+    clip_end_s REAL,
     created_at TEXT,
     updated_at TEXT
 );
@@ -229,6 +231,8 @@ def init_schema(conn: Connection) -> None:
     _ensure_column(conn, "episodes", "import_attempts", "INT DEFAULT 0")
     _ensure_column(conn, "titles", "source", "TEXT DEFAULT 'test'")
     _ensure_column(conn, "placements", "cost_usd", "REAL")
+    _ensure_column(conn, "placements", "clip_start_s", "REAL")
+    _ensure_column(conn, "placements", "clip_end_s", "REAL")
     _backfill_title_source(conn)
     conn.commit()
 
