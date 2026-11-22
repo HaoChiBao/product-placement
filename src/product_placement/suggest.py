@@ -358,10 +358,10 @@ def suggest(
 ) -> list[Moment]:
     """Find 3–5 spread-out placement moments in a full-length video.
 
-    When ``OPENROUTER_API_KEY`` is set, Jev on OpenRouter screens contact sheets and
-    boxes a full frame, falling back to YuNet + YOLOX if Jev returns nothing or raises.
-    Otherwise the classical scorer runs. A brand re-ranks and can veto on that path,
-    and is written into the Jev prompt.
+    When ``OPENROUTER_API_KEY`` is set, Gemini on OpenRouter looks for existing
+    swappable objects in per-shot keyframes, falling back to YuNet + YOLOX if that
+    finder returns nothing or raises. Otherwise the classical scorer runs. A brand
+    re-ranks and can veto on that path, and is written into the finder prompt.
     """
     if (os.environ.get("OPENROUTER_API_KEY") or "").strip():
         from product_placement.jev_moments import suggest_with_jev

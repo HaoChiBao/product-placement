@@ -1,7 +1,8 @@
-"""Placement moments from TypeSafe Jev on OpenRouter.
+"""Per-shot product finder on OpenRouter.
 
-Samples the video at 1 fps, screens labelled contact sheets, then asks for a
-presence-gated box on the full frame. Used when OPENROUTER_API_KEY is set.
+Samples about one full-resolution keyframe per second inside each shot, asks
+Gemini for existing swappable objects, and merges those boxes into moments.
+Used when OPENROUTER_API_KEY is set.
 """
 
 from __future__ import annotations
@@ -11,8 +12,6 @@ import json
 import math
 import os
 import re
-import shutil
-import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -26,29 +25,49 @@ import numpy as np
 
 from product_placement.crop_stitch import probe_video
 from product_placement.suggest import (
-    MAX_CAM_MOTION,
     MIN_WINDOW_S,
-    WINDOW_S,
     Moment,
     _Cand,
     _read_frame_at,
     clamp_n,
-    pick_spread,
     write_contact_sheet,
 )
-from product_placement.vision import BBox, camera_motion_px, detect_shots
+from product_placement.vision import BBox, Shot, detect_shots
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-DEFAULT_MODEL = "typesafe/jev-router"
-MAX_SIDE = 1568
-PER_SHEET = 60
-SAMPLE_FPS = 1.0
+DEFAULT_MODEL = "google/gemini-3.8-flash"
+KEYFRAME_EVERY_S = 1.0
+KEYFRAME_MARGIN_S = 0.15
+MIN_KEYFRAMES = 3
+FRAMES_PER_CALL = 8
 POOL = 8
-VERIFY_TOP = 12
-PRESENCE_MIN = 0.5
-CALL_TIMEOUT_S = 45.0
+MERGE_IOU = 0.3
+VISIBILITY_MIN = 0.3
+CALL_TIMEOUT_S = 120.0
+JPEG_QUALITY = 90
 
 _FENCE = re.compile(r"^\s*```(?:json)?\s*(.*?)\s*```\s*$", re.IGNORECASE | re.DOTALL)
+_STOP = frozenset({"a", "an", "the", "of", "on", "in", "and", "with"})
+_SURFACE = frozenset(
+    {
+        "table",
+        "tabletop",
+        "surface",
+        "counter",
+        "countertop",
+        "desk",
+        "shelf",
+        "floor",
+        "wall",
+        "empty",
+        "background",
+        "seat",
+        "sofa",
+        "couch",
+        "bench",
+    }
+)
+_PEOPLE = frozenset({"person", "people", "face", "clothing", "clothes", "apparel"})
 
 
 def moment_model() -> str:
@@ -66,259 +85,31 @@ def _redact(text: str, key: str) -> str:
     return flat[:300]
 
 
-@dataclass(frozen=True)
-class Layout:
-    cols: int
-    rows: int
-    tile_w: int
-    tile_h: int
-
-    @property
-    def capacity(self) -> int:
-        return self.cols * self.rows
-
-
-def choose_layout(aspect: float, tiles: int, max_side: int = MAX_SIDE) -> Layout:
-    """Largest tiles that fit `tiles` frames of this aspect inside max_side."""
-    if aspect <= 0 or tiles < 1 or max_side < 2:
-        raise ValueError("no contact-sheet layout")
-    best: Layout | None = None
-    best_key: tuple[int, int] | None = None
-    for cols in range(1, tiles + 1):
-        rows = math.ceil(tiles / cols)
-        tile_w = math.floor(min(max_side / cols, max_side * aspect / rows))
-        tile_h = math.floor(tile_w / aspect) if aspect else 0
-        if tile_w < 1 or tile_h < 1:
-            continue
-        candidate = Layout(cols, rows, tile_w, tile_h)
-        key = (candidate.tile_w * candidate.tile_h, -(candidate.capacity - tiles))
-        if best is None or best_key is None or key > best_key:
-            best = candidate
-            best_key = key
-    if best is None:
-        raise ValueError(f"no contact-sheet layout for {tiles} tiles")
-    return best
-
-
-def _layout_for(aspect: float, n_frames: int) -> Layout:
-    return choose_layout(aspect, min(PER_SHEET, max(1, n_frames)), MAX_SIDE)
-
-
-def tile_label(slot: int, per_sheet: int) -> str:
-    width = max(2, len(str(max(per_sheet, 1))))
-    return f"T{slot + 1:0{width}d}"
-
-
-@dataclass(frozen=True)
-class SheetPlan:
-    index: int
-    tiles: tuple[tuple[str, float], ...]
-
-    def time_of(self, tile_id: str) -> float | None:
-        for tid, t in self.tiles:
-            if tid == tile_id:
-                return t
-        return None
-
-
-def plan_sheets(
-    n_frames: int, *, fps: float = SAMPLE_FPS, per_sheet: int = PER_SHEET
-) -> list[SheetPlan]:
-    """Map sampled frame i to time i/fps, chunked into sheets labelled T01…"""
-    if n_frames <= 0 or per_sheet <= 0 or fps <= 0:
+def keyframe_times(start_s: float, end_s: float) -> list[float]:
+    """About one frame per second, at least three, each inset from the cuts."""
+    start = float(start_s)
+    end = float(end_s)
+    span = end - start
+    if span <= 0:
         return []
-    plans: list[SheetPlan] = []
-    for index, start in enumerate(range(0, n_frames, per_sheet)):
-        count = min(per_sheet, n_frames - start)
-        tiles = tuple(
-            (tile_label(slot, per_sheet), round((start + slot) / fps, 3))
-            for slot in range(count)
-        )
-        plans.append(SheetPlan(index=index, tiles=tiles))
-    return plans
+    if span <= 2 * KEYFRAME_MARGIN_S:
+        return [round((start + end) / 2.0, 3)]
+    n = max(MIN_KEYFRAMES, int(round(span / KEYFRAME_EVERY_S)))
+    usable = span - 2 * KEYFRAME_MARGIN_S
+    times = [
+        round(start + KEYFRAME_MARGIN_S + usable * k / (n - 1), 3) for k in range(n)
+    ]
+    out: list[float] = []
+    for t in times:
+        if not out or t > out[-1] + 1e-9:
+            out.append(t)
+    return out
 
 
-def moment_window(
-    t: float,
-    duration: float,
-    window_s: float,
-    *,
-    lo: float | None = None,
-    hi: float | None = None,
-) -> tuple[float, float]:
-    start_bound = 0.0 if lo is None else float(lo)
-    end_bound = float(duration) if hi is None else float(hi)
-    span = end_bound - start_bound
-    if span <= window_s:
-        return start_bound, max(end_bound, start_bound)
-    start = min(max(start_bound, t - window_s / 2.0), end_bound - window_s)
-    return start, start + window_s
-
-
-def _draw_label(tile: np.ndarray, label: str) -> None:
-    h, w = tile.shape[:2]
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    scale = max(0.35, min(0.9, h / 160))
-    thickness = 1
-    (tw, th), base = cv2.getTextSize(label, font, scale, thickness)
-    while scale > 0.3 and tw + 8 > w:
-        scale = round(scale - 0.05, 2)
-        (tw, th), base = cv2.getTextSize(label, font, scale, thickness)
-    cv2.rectangle(tile, (0, 0), (min(w, tw + 8), min(h, th + base + 6)), (0, 0, 0), -1)
-    cv2.putText(tile, label, (4, th + 2), font, scale, (255, 255, 255), thickness, cv2.LINE_AA)
-
-
-def _fit_tile(frame: np.ndarray, tile_w: int, tile_h: int) -> np.ndarray:
-    h, w = frame.shape[:2]
-    if w == tile_w and h == tile_h:
-        return frame.copy()
-    scale = min(tile_w / max(w, 1), tile_h / max(h, 1))
-    nw = max(1, min(tile_w, int(round(w * scale))))
-    nh = max(1, min(tile_h, int(round(h * scale))))
-    resized = cv2.resize(frame, (nw, nh), interpolation=cv2.INTER_AREA)
-    canvas = np.zeros((tile_h, tile_w, 3), np.uint8)
-    x = (tile_w - nw) // 2
-    y = (tile_h - nh) // 2
-    canvas[y : y + nh, x : x + nw] = resized
-    return canvas
-
-
-def compose_sheet(frames: list[np.ndarray], ids: list[str], layout: Layout) -> np.ndarray:
-    if len(frames) != len(ids):
-        raise ValueError("one id per frame")
-    if len(frames) > layout.capacity:
-        raise ValueError("too many frames for the layout")
-    canvas = np.zeros((layout.rows * layout.tile_h, layout.cols * layout.tile_w, 3), np.uint8)
-    for slot, (frame, tile_id) in enumerate(zip(frames, ids)):
-        col = slot % layout.cols
-        row = slot // layout.cols
-        x = col * layout.tile_w
-        y = row * layout.tile_h
-        tile = _fit_tile(frame, layout.tile_w, layout.tile_h)
-        _draw_label(tile, tile_id)
-        canvas[y : y + layout.tile_h, x : x + layout.tile_w] = tile
-    return canvas
-
-
-def _jpeg(image: np.ndarray, *, max_side: int | None = None) -> bytes:
-    if max_side is not None:
-        h, w = image.shape[:2]
-        longest = max(h, w)
-        if longest > max_side and longest > 0:
-            scale = max_side / longest
-            image = cv2.resize(
-                image,
-                (max(1, int(round(w * scale))), max(1, int(round(h * scale)))),
-                interpolation=cv2.INTER_AREA,
-            )
-    ok, buf = cv2.imencode(".jpg", image, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
-    if not ok:
-        raise RuntimeError("could not encode jpeg")
-    return buf.tobytes()
-
-
-def sample_tiles(video: Path, dest: Path, layout: Layout) -> list[Path]:
-    if shutil.which("ffmpeg") is None:
-        raise RuntimeError("ffmpeg was not found on PATH")
-    dest.mkdir(parents=True, exist_ok=True)
-    vf = (
-        f"fps={SAMPLE_FPS}:round=up,"
-        f"scale={layout.tile_w}:{layout.tile_h}:force_original_aspect_ratio=decrease"
-    )
-    completed = subprocess.run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-y",
-            "-i",
-            str(video),
-            "-map",
-            "0:v:0",
-            "-vf",
-            vf,
-            "-q:v",
-            "4",
-            str(dest / "f%06d.jpg"),
-        ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    if completed.returncode != 0:
-        detail = completed.stderr.decode(errors="replace").strip()[:500]
-        raise RuntimeError(f"ffmpeg could not sample frames: {detail}")
-    return sorted(dest.glob("f*.jpg"))
-
-
-def _sheet_jpegs(paths: list[Path], plans: list[SheetPlan], layout: Layout) -> list[bytes]:
-    jpegs: list[bytes] = []
-    cursor = 0
-    for plan in plans:
-        chunk = paths[cursor : cursor + len(plan.tiles)]
-        if len(chunk) != len(plan.tiles):
-            raise RuntimeError("sheet frame count does not match the tile map")
-        if len(chunk) > layout.capacity:
-            raise RuntimeError("sheet has more frames than the layout")
-        frames: list[np.ndarray] = []
-        for path in chunk:
-            img = cv2.imread(str(path))
-            if img is None:
-                img = np.zeros((layout.tile_h, layout.tile_w, 3), np.uint8)
-            frames.append(img)
-        cursor += len(plan.tiles)
-        ids = [tid for tid, _ in plan.tiles]
-        jpegs.append(_jpeg(compose_sheet(frames, ids, layout)))
-    return jpegs
-
-
-def _object_schema(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "properties": properties,
-        "required": required,
-    }
-
-
-def sheet_schema(tile_ids: list[str]) -> dict[str, Any]:
-    hit = _object_schema(
-        {
-            "tile": {"type": "string", "enum": list(tile_ids)},
-            "score": {"type": "number"},
-            "reason": {"type": "string"},
-        },
-        ["tile", "score", "reason"],
-    )
-    return _object_schema({"moments": {"type": "array", "items": hit}}, ["moments"])
-
-
-BOX_SCHEMA = _object_schema(
-    {
-        "target": {"type": "string"},
-        "present": {"type": "boolean"},
-        "presence": {"type": "number"},
-        "left": {"type": "number"},
-        "top": {"type": "number"},
-        "right": {"type": "number"},
-        "bottom": {"type": "number"},
-        "confidence": {"type": "number"},
-        "reason": {"type": "string"},
-    },
-    [
-        "target",
-        "present",
-        "presence",
-        "left",
-        "top",
-        "right",
-        "bottom",
-        "confidence",
-        "reason",
-    ],
-)
+def chunked(items: list, size: int) -> list[list]:
+    if size < 1:
+        raise ValueError("size")
+    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 def brand_hint(brand: Any) -> str:
@@ -339,29 +130,22 @@ def brand_hint(brand: Any) -> str:
     )
 
 
-def screen_prompt(plan: SheetPlan, brand: Any) -> str:
-    ids = ", ".join(tid for tid, _ in plan.tiles)
+def finder_prompt(times: list[float], brand: Any) -> str:
+    listing = ", ".join(f"Frame {i} at {t:.3f}s" for i, t in enumerate(times))
+    n = len(times)
+    last = max(0, n - 1)
     return (
-        "The image is a contact sheet of video frames, one per second, left to right, top to bottom. "
-        "Each tile has its id in the top-left corner. "
-        f"Valid tile ids: {ids}. "
-        "List the tiles that are good product-placement moments: a steady shot, a clear prop or flat "
-        "surface a product can sit on, and no face blocking that spot. "
-        "score is from 0 to 1. reason is one short sentence. Omit tiles that do not qualify."
-        + brand_hint(brand)
-    )
-
-
-def box_prompt(brand: Any) -> str:
-    return (
-        "This is one full video frame. Name the placement target: a clear prop or flat surface "
-        "where a product can sit, not blocked by a face. "
-        "present is true only if that target is visible. "
-        "presence is how sure you are that it is visible, from 0 to 1. "
-        "Always include a box as fractions of the frame width and height: left, top, right, bottom, "
-        "each from 0 to 1, origin at the top-left. right must be greater than left and bottom greater than top. "
-        f"The box is discarded when present is false or presence is below {PRESENCE_MIN:.1f}. "
-        "confidence is how sure the box edges are, from 0 to 1. reason is one short sentence."
+        "You are finding EXISTING physical objects in these video frames that an editor could swap "
+        "for a branded product (bottle, can, glass, cup, mug, phone, laptop, food or drink package, "
+        "box, bag, watch). Only list objects actually visible; never empty surfaces, people or clothing. "
+        f"There are {n} frames in order ({listing}). "
+        f"For each object: frame (the frame index, 0 to {last}), "
+        "label (short specific noun phrase, e.g. 'green wine bottle'), "
+        "category (one word: bottle, wine_glass, glass, cup, can, phone, laptop, plate, food, other), "
+        "swap_with (product type that fits its shape), "
+        "visibility (0-1: how unoccluded and large), "
+        "and box_2d [ymin, xmin, ymax, xmax] normalized 0-1000. "
+        'JSON only: {"objects":[...]}, at most 10 per frame, most swappable first.'
         + brand_hint(brand)
     )
 
@@ -377,96 +161,309 @@ def parse_json_content(text: str) -> Any:
         raise ValueError("invalid JSON") from exc
 
 
-def _unit(value: Any, name: str) -> float:
+def _finite(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(name)
+        return None
     number = float(value)
-    if not math.isfinite(number) or number < 0.0 or number > 1.0:
-        raise ValueError(name)
+    if not math.isfinite(number):
+        return None
     return number
 
 
-@dataclass(frozen=True)
-class TileHit:
-    tile: str
-    time_s: float
-    score: float
-    reason: str
+def _label_tokens(label: str) -> frozenset[str]:
+    return frozenset(tok for tok in re.findall(r"[a-z0-9]+", label.lower()) if tok not in _STOP)
 
 
-def sheet_hits_from_payload(payload: Any, plan: SheetPlan) -> list[TileHit]:
-    if not isinstance(payload, dict) or not isinstance(payload.get("moments"), list):
-        raise ValueError("sheet moments")
-    times = {tid: t for tid, t in plan.tiles}
-    best: dict[str, TileHit] = {}
-    for item in payload["moments"]:
-        if not isinstance(item, dict):
-            raise ValueError("tile")
-        tile = item.get("tile")
-        if not isinstance(tile, str) or tile not in times:
-            raise ValueError("tile")
-        score = _unit(item.get("score"), "score")
-        reason = item.get("reason")
-        if not isinstance(reason, str) or not reason.strip():
-            raise ValueError("reason")
-        hit = TileHit(tile, times[tile], score, reason.strip())
-        prev = best.get(tile)
-        if prev is None or hit.score > prev.score:
-            best[tile] = hit
-    return list(best.values())
+def normalize_category(category: str) -> str:
+    text = (category or "other").strip().lower() or "other"
+    return "plate" if text == "food" else text
 
 
-def fractions_to_bbox(
-    left: float, top: float, right: float, bottom: float, width: int, height: int
-) -> BBox:
+def _is_surface(label: str, category: str) -> bool:
+    if category.strip().lower() in _PEOPLE:
+        return True
+    tokens = _label_tokens(label)
+    return bool(tokens) and tokens <= _SURFACE
+
+
+def gemini_box_to_bbox(box_2d: Any, width: int, height: int) -> BBox:
+    """[ymin, xmin, ymax, xmax] in 0-1000 → pixel xywh, clamped to the frame."""
     if width < 1 or height < 1:
         raise ValueError("frame size")
-    if float(right) <= float(left) or float(bottom) <= float(top):
+    if not isinstance(box_2d, (list, tuple)) or len(box_2d) != 4:
+        raise ValueError("box_2d")
+    nums = [_finite(v) for v in box_2d]
+    if any(n is None for n in nums):
+        raise ValueError("box_2d")
+    ymin, xmin, ymax, xmax = (min(1000.0, max(0.0, float(n))) for n in nums)
+    if xmax <= xmin or ymax <= ymin:
         raise ValueError("empty box")
-    x = int(round(float(left) * width))
-    y = int(round(float(top) * height))
-    x2 = int(round(float(right) * width))
-    y2 = int(round(float(bottom) * height))
+    x = int(round(xmin / 1000.0 * width))
+    y = int(round(ymin / 1000.0 * height))
+    x2 = int(round(xmax / 1000.0 * width))
+    y2 = int(round(ymax / 1000.0 * height))
     return BBox(x, y, max(1, x2 - x), max(1, y2 - y)).clamp(width, height)
 
 
-@dataclass(frozen=True)
-class Placement:
-    target: str
-    presence: float
-    confidence: float
-    reason: str
-    region: BBox
-
-
-def placement_from_payload(payload: Any, width: int, height: int) -> Placement | None:
-    """Drop the box when the presence gate fails. The model always returns a rectangle."""
-    if not isinstance(payload, dict):
-        raise ValueError("placement")
-    if "present" not in payload or "presence" not in payload:
-        raise ValueError("presence")
-    present = payload["present"]
-    if not isinstance(present, bool):
-        raise ValueError("present")
-    presence = _unit(payload["presence"], "presence")
-    if not present or presence < PRESENCE_MIN:
+def _frame_index(value: Any, n_frames: int) -> int | None:
+    if isinstance(value, bool):
         return None
-    target = payload.get("target")
-    reason = payload.get("reason")
-    if not isinstance(target, str) or not target.strip():
-        raise ValueError("target")
-    if not isinstance(reason, str) or not reason.strip():
-        raise ValueError("reason")
-    region = fractions_to_bbox(
-        _unit(payload.get("left"), "left"),
-        _unit(payload.get("top"), "top"),
-        _unit(payload.get("right"), "right"),
-        _unit(payload.get("bottom"), "bottom"),
-        width,
-        height,
-    )
-    confidence = _unit(payload.get("confidence"), "confidence")
-    return Placement(target.strip(), presence, confidence, reason.strip(), region)
+    if isinstance(value, int):
+        idx = value
+    elif isinstance(value, float) and value.is_integer():
+        idx = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        idx = int(value.strip())
+    else:
+        return None
+    if idx < 0 or idx >= n_frames:
+        return None
+    return idx
+
+
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+@dataclass(frozen=True)
+class RawObject:
+    frame: int
+    label: str
+    category: str
+    swap_with: str
+    visibility: float
+    box: BBox
+
+
+def parse_objects(payload: Any, sizes: list[tuple[int, int]]) -> list[RawObject]:
+    """Objects from one batch. A bad item is skipped; a bad payload raises."""
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict) and isinstance(payload.get("objects"), list):
+        items = payload["objects"]
+    else:
+        raise ValueError("objects")
+    n_frames = len(sizes)
+    found: list[RawObject] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if "frame" in item:
+            frame = _frame_index(item.get("frame"), n_frames)
+        elif n_frames == 1:
+            frame = 0
+        else:
+            frame = None
+        if frame is None:
+            continue
+        label = _text(item.get("label"))
+        if not label:
+            continue
+        category = _text(item.get("category"))
+        if _is_surface(label, category):
+            continue
+        visibility = _finite(item.get("visibility"))
+        if visibility is None:
+            continue
+        visibility = min(1.0, max(0.0, visibility))
+        width, height = sizes[frame]
+        try:
+            box = gemini_box_to_bbox(item.get("box_2d"), width, height)
+        except ValueError:
+            continue
+        found.append(
+            RawObject(
+                frame=frame,
+                label=label,
+                category=category,
+                swap_with=_text(item.get("swap_with")),
+                visibility=visibility,
+                box=box,
+            )
+        )
+    return found
+
+
+@dataclass(frozen=True)
+class Hit:
+    shot_i: int
+    time_s: float
+    label: str
+    category: str
+    swap_with: str
+    visibility: float
+    box: BBox
+    key: int
+
+
+@dataclass(frozen=True)
+class Track:
+    shot_i: int
+    label: str
+    category: str
+    swap_with: str
+    visibility: float
+    box: BBox
+    start_s: float
+    end_s: float
+    sightings: int
+    frame_key: int
+
+
+def _containment(a: BBox, b: BBox) -> float:
+    ax2, ay2 = a.x + a.w, a.y + a.h
+    bx2, by2 = b.x + b.w, b.y + b.h
+    ix = max(0, min(ax2, bx2) - max(a.x, b.x))
+    iy = max(0, min(ay2, by2) - max(a.y, b.y))
+    inter = ix * iy
+    return inter / max(1, min(a.area, b.area))
+
+
+def box_similarity(a: BBox, b: BBox) -> float:
+    """IoU, or a slightly discounted score when one box contains the other."""
+    overlap = a.iou(b)
+    contained = _containment(a, b)
+    if contained > 0.8:
+        return max(overlap, 0.9 * contained)
+    return overlap
+
+
+def track_window(
+    times: list[float],
+    keyframes: list[float],
+    shot_start: float,
+    shot_end: float,
+) -> tuple[float, float]:
+    """Shot edge when the object reaches that edge's keyframe, otherwise the midpoint."""
+    if not times:
+        raise ValueError("times")
+    shot_start = float(shot_start)
+    shot_end = float(shot_end)
+    if shot_end < shot_start:
+        shot_start, shot_end = shot_end, shot_start
+    kt = sorted(float(t) for t in keyframes) or sorted(float(t) for t in times)
+
+    def _index(t: float) -> int:
+        return min(range(len(kt)), key=lambda i: abs(kt[i] - t))
+
+    i0 = _index(min(times))
+    i1 = _index(max(times))
+    if i1 < i0:
+        i0, i1 = i1, i0
+    start = shot_start if i0 == 0 else round((kt[i0 - 1] + kt[i0]) / 2.0, 3)
+    end = shot_end if i1 == len(kt) - 1 else round((kt[i1] + kt[i1 + 1]) / 2.0, 3)
+    start = min(max(float(start), shot_start), shot_end)
+    end = min(max(float(end), shot_start), shot_end)
+    if end < start:
+        start, end = end, start
+    if end <= start:
+        return shot_start, shot_end
+    return start, end
+
+
+def _dedupe_frame(hits: list[Hit]) -> list[Hit]:
+    """Drop a plate or food box that sits inside a larger one, whatever the model lists first."""
+    plates = [hit for hit in hits if normalize_category(hit.category) == "plate"]
+    dropped: set[int] = set()
+    kept: list[Hit] = []
+    for hit in sorted(plates, key=lambda item: item.box.area, reverse=True):
+        if any(_containment(prev.box, hit.box) > 0.8 for prev in kept):
+            dropped.add(id(hit))
+            continue
+        kept.append(hit)
+    return [hit for hit in hits if id(hit) not in dropped]
+
+
+def _dedupe_hits(hits: list[Hit]) -> list[Hit]:
+    grouped: dict[tuple[int, float], list[Hit]] = {}
+    order: list[tuple[int, float]] = []
+    for hit in hits:
+        key = (hit.shot_i, hit.time_s)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(hit)
+    deduped: list[Hit] = []
+    for key in order:
+        deduped.extend(_dedupe_frame(grouped[key]))
+    return deduped
+
+
+def _majority_label(hits: list[Hit]) -> str:
+    counts: dict[str, int] = {}
+    first: dict[str, int] = {}
+    for index, hit in enumerate(hits):
+        counts[hit.label] = counts.get(hit.label, 0) + 1
+        first.setdefault(hit.label, index)
+    return max(counts, key=lambda label: (counts[label], -first[label]))
+
+
+class _Group:
+    def __init__(self, hit: Hit) -> None:
+        self.shot_i = hit.shot_i
+        self.category = normalize_category(hit.category)
+        self.hits: list[Hit] = [hit]
+
+
+def merge_hits(
+    hits: list[Hit],
+    shots: list[tuple[float, float]],
+    keyframes: list[list[float]] | None = None,
+) -> list[Track]:
+    """One track per object per shot. Same category and overlapping boxes merge."""
+    groups: list[_Group] = []
+    ordered = sorted(_dedupe_hits(hits), key=lambda h: (h.shot_i, h.time_s, -h.visibility))
+    for hit in ordered:
+        category = normalize_category(hit.category)
+        best: _Group | None = None
+        best_score = 0.0
+        for group in groups:
+            if group.shot_i != hit.shot_i or group.category != category:
+                continue
+            if group.hits[-1].time_s == hit.time_s:
+                continue
+            score = max(box_similarity(prev.box, hit.box) for prev in group.hits)
+            if score > best_score:
+                best = group
+                best_score = score
+        if best is not None and best_score > MERGE_IOU:
+            best.hits.append(hit)
+        else:
+            groups.append(_Group(hit))
+
+    tracks: list[Track] = []
+    for group in groups:
+        if len(group.hits) == 1 and group.hits[0].visibility < VISIBILITY_MIN:
+            continue
+        if group.shot_i < 0 or group.shot_i >= len(shots):
+            continue
+        earliest = min(group.hits, key=lambda h: (h.time_s, -h.visibility))
+        clearest = max(group.hits, key=lambda h: (h.visibility, -h.time_s))
+        shot_frames = []
+        if keyframes is not None and group.shot_i < len(keyframes):
+            shot_frames = keyframes[group.shot_i]
+        start_s, end_s = track_window(
+            [h.time_s for h in group.hits],
+            shot_frames,
+            shots[group.shot_i][0],
+            shots[group.shot_i][1],
+        )
+        swap = earliest.swap_with or next((h.swap_with for h in group.hits if h.swap_with), "")
+        tracks.append(
+            Track(
+                shot_i=group.shot_i,
+                label=_majority_label(group.hits),
+                category=group.category,
+                swap_with=swap,
+                visibility=sum(h.visibility for h in group.hits) / len(group.hits),
+                box=clearest.box,
+                start_s=start_s,
+                end_s=end_s,
+                sightings=len(group.hits),
+                frame_key=clearest.key,
+            )
+        )
+    return tracks
 
 
 def _coerce_text(content: Any) -> str:
@@ -500,32 +497,27 @@ def _post_content(
     client: httpx.Client,
     *,
     key: str,
-    image: bytes,
+    images: list[bytes],
     prompt: str,
-    schema_name: str,
-    schema: dict[str, Any],
     model: str,
 ) -> str:
+    if not images:
+        raise ValueError("no frames")
+    content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for image in images:
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")
+                },
+            }
+        )
     body = {
         "model": model,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "data:image/jpeg;base64," + base64.b64encode(image).decode("ascii")
-                        },
-                    },
-                ],
-            }
-        ],
-        "response_format": {
-            "type": "json_schema",
-            "json_schema": {"name": schema_name, "strict": True, "schema": schema},
-        },
+        "messages": [{"role": "user", "content": content}],
+        "response_format": {"type": "json_object"},
+        "reasoning": {"effort": "low"},
     }
     try:
         response = client.post(
@@ -550,24 +542,21 @@ def call_validated(
     client: httpx.Client,
     *,
     key: str,
-    image: bytes,
+    images: list[bytes],
     prompt: str,
     schema_name: str,
-    schema: dict[str, Any],
     validate: Callable[[Any], Any],
     model: str | None = None,
 ) -> Any:
-    """POST one image. Parse and validate. Retry once, then return None."""
+    """POST one batch of frames. Parse and validate. Retry once, then return None."""
     chosen = model or moment_model()
     for attempt in (1, 2):
         try:
             text = _post_content(
                 client,
                 key=key,
-                image=image,
+                images=images,
                 prompt=prompt,
-                schema_name=schema_name,
-                schema=schema,
                 model=chosen,
             )
             return validate(parse_json_content(text))
@@ -585,25 +574,69 @@ def _parallel(fn: Callable, items: list) -> list:
         return list(pool.map(fn, items))
 
 
-def _shot_index(shots, t: float) -> int:
-    for i, shot in enumerate(shots):
-        if shot.start_s <= t < shot.end_s:
-            return i
-    return max(0, len(shots) - 1)
+def _jpeg(frame: np.ndarray) -> bytes:
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+    if not ok:
+        raise RuntimeError("could not encode jpeg")
+    return buf.tobytes()
 
 
-@dataclass
-class _Frame:
-    start_s: float
-    end_s: float
-    reason: str
+@dataclass(frozen=True)
+class Keyframe:
     shot_i: int
-    frame: np.ndarray
+    time_s: float
+    path: Path
+    width: int
+    height: int
+
+
+def _collect_keyframes(cap: cv2.VideoCapture, shots: list[Shot], dest: Path) -> list[Keyframe]:
+    found: list[Keyframe] = []
+    for shot_i, shot in enumerate(shots):
+        for t in keyframe_times(shot.start_s, shot.end_s):
+            frame = _read_frame_at(cap, t, lo_s=shot.start_s, hi_s=shot.end_s)
+            if frame is None or frame.size == 0:
+                continue
+            height, width = frame.shape[:2]
+            if width < 2 or height < 2:
+                continue
+            path = dest / f"kf_{len(found):04d}.jpg"
+            path.write_bytes(_jpeg(frame))
+            found.append(Keyframe(shot_i, float(t), path, int(width), int(height)))
+    return found
+
+
+def _reason(label: str, category: str, swap_with: str) -> str:
+    parts = [label]
+    if category:
+        parts.append(category)
+    if swap_with:
+        parts.append(f"swap with {swap_with}")
+    return "; ".join(parts)
+
+
+def _pick(cands: list[_Cand], n: int) -> list[_Cand]:
+    ranked = sorted(cands, key=lambda c: c.score, reverse=True)
+    picked: list[_Cand] = []
+    for cand in ranked:
+        if len(picked) >= n:
+            break
+        if any(cand.shot_i == prev.shot_i for prev in picked):
+            continue
+        picked.append(cand)
+    for cand in ranked:
+        if len(picked) >= n:
+            break
+        if any(cand is prev for prev in picked):
+            continue
+        picked.append(cand)
+    picked.sort(key=lambda c: (c.start_s, -c.score))
+    return picked
 
 
 def _none_found() -> RuntimeError:
     return RuntimeError(
-        "no placement moments found (need stable, face-clear windows with a surface/prop)"
+        "no placement moments found (no swappable object stayed visible inside a shot)"
     )
 
 
@@ -612,7 +645,7 @@ def suggest_with_jev(
     n: int = 5,
     *,
     out_dir: str | Path = "runs/suggest",
-    window_s: float = WINDOW_S,
+    window_s: float = 5.0,
     brand: Any = None,
     diagnostics: dict[str, Any] | None = None,
     api_key: str | None = None,
@@ -639,165 +672,120 @@ def suggest_with_jev(
         diagnostics["vetoed"] = []
         diagnostics["candidates"] = candidates
         diagnostics["brand_id"] = getattr(brand, "id", None)
-        diagnostics["finder"] = "jev"
+        diagnostics["finder"] = "gemini"
 
     _err(f"model {moment_model()} duration {duration:.1f}s")
-    aspect = width / height
     owns_client = client is None
     client = client or httpx.Client(timeout=CALL_TIMEOUT_S)
     cap = cv2.VideoCapture(str(video_path))
     try:
         if not cap.isOpened():
             raise FileNotFoundError(f"cannot open video: {video_path}")
-
-        with tempfile.TemporaryDirectory(prefix="jev-sheets-") as tmp:
-            estimate = max(1, int(math.ceil(duration * SAMPLE_FPS)))
-            paths = sample_tiles(video_path, Path(tmp), _layout_for(aspect, estimate))
-            if not paths:
-                raise RuntimeError("ffmpeg produced no frames")
-            layout = _layout_for(aspect, len(paths))
-            plans = plan_sheets(len(paths), fps=SAMPLE_FPS, per_sheet=PER_SHEET)
-            jpegs = _sheet_jpegs(paths, plans, layout)
-
-        def _screen(item: tuple[bytes, SheetPlan]) -> list[TileHit] | None:
-            jpeg, plan = item
-            ids = [tid for tid, _ in plan.tiles]
-            return call_validated(
-                client,
-                key=key,
-                image=jpeg,
-                prompt=screen_prompt(plan, brand),
-                schema_name="placement_sheet",
-                schema=sheet_schema(ids),
-                validate=lambda payload: sheet_hits_from_payload(payload, plan),
-            )
-
-        screened = _parallel(_screen, list(zip(jpegs, plans)))
-        hits: list[TileHit] = []
-        failed = 0
-        for result in screened:
-            if result is None:
-                failed += 1
-                continue
-            hits.extend(result)
-        _err(f"{len(plans)} sheets, {failed} failed, {len(hits)} tiles")
-        if not hits:
-            _diag(0)
-            if plans and failed == len(plans):
-                raise RuntimeError(
-                    "placement screening failed; no contact sheet returned a valid answer"
-                )
-            raise _none_found()
-
-        by_time: dict[float, TileHit] = {}
-        for hit in hits:
-            prev = by_time.get(hit.time_s)
-            if prev is None or hit.score > prev.score:
-                by_time[hit.time_s] = hit
         shots = detect_shots(cap)
-        blank = np.zeros((2, 2, 3), np.uint8)
-        screen_cands = [
-            _Cand(
-                start_s=hit.time_s,
-                end_s=hit.time_s,
-                frame=blank,
-                region=BBox(0, 0, 1, 1),
-                whats_there="",
-                score=hit.score,
-                reason=hit.reason,
-                shot_i=_shot_index(shots, hit.time_s),
-            )
-            for hit in by_time.values()
-        ]
-        min_gap = max(MIN_WINDOW_S, duration / max(n * 2.5, 1))
-        short = pick_spread(screen_cands, VERIFY_TOP, min_gap_s=min_gap)
-        if len(short) < min(n, len(screen_cands)):
-            short = pick_spread(screen_cands, VERIFY_TOP, min_gap_s=MIN_WINDOW_S * 0.5)
+        if not shots:
+            shots = [Shot(0.0, duration)]
+        shot_bounds = [(shot.start_s, shot.end_s) for shot in shots]
 
-        prepared: list[_Frame] = []
-        for cand in short:
-            if shots:
-                shot = shots[_shot_index(shots, cand.start_s)]
-                lo, hi = shot.start_s, shot.end_s
-            else:
-                lo, hi = 0.0, duration
-            start_s, end_s = moment_window(
-                cand.start_s, duration, window_s, lo=lo, hi=hi
-            )
-            cam = camera_motion_px(cap, start_s, end_s)
-            if cam > MAX_CAM_MOTION:
-                _err(f"skip {cand.start_s:.1f}s camera motion {cam:.0f}px")
-                continue
-            frame = _read_frame_at(cap, cand.start_s, lo_s=lo, hi_s=hi)
-            if frame is None:
-                _err(f"skip {cand.start_s:.1f}s unreadable frame")
-                continue
-            prepared.append(
-                _Frame(
-                    start_s=start_s,
-                    end_s=end_s,
-                    reason=cand.reason,
-                    shot_i=cand.shot_i,
-                    frame=frame,
+        with tempfile.TemporaryDirectory(prefix="product-frames-") as tmp:
+            keyframes = _collect_keyframes(cap, shots, Path(tmp))
+            if not keyframes:
+                _diag(0)
+                raise RuntimeError("no keyframes could be read")
+            _err(f"{len(shots)} shots, {len(keyframes)} keyframes")
+            batches = chunked(keyframes, FRAMES_PER_CALL)
+
+            def _ask(batch: list[Keyframe]) -> list[Hit] | None:
+                sizes = [(kf.width, kf.height) for kf in batch]
+                parsed = call_validated(
+                    client,
+                    key=key,
+                    images=[kf.path.read_bytes() for kf in batch],
+                    prompt=finder_prompt([kf.time_s for kf in batch], brand),
+                    schema_name="products",
+                    validate=lambda payload, sizes=sizes: parse_objects(payload, sizes),
                 )
-            )
-        _err(f"verifying {len(prepared)}")
+                if parsed is None:
+                    return None
+                hits: list[Hit] = []
+                for obj in parsed:
+                    kf = batch[obj.frame]
+                    hits.append(
+                        Hit(
+                            shot_i=kf.shot_i,
+                            time_s=kf.time_s,
+                            label=obj.label,
+                            category=obj.category,
+                            swap_with=obj.swap_with,
+                            visibility=obj.visibility,
+                            box=obj.box,
+                            key=keyframes.index(kf),
+                        )
+                    )
+                return hits
 
-        def _verify(item: _Frame) -> _Cand | None:
-            h, w = item.frame.shape[:2]
-            if w < 2 or h < 2:
-                return None
-            placed = call_validated(
-                client,
-                key=key,
-                image=_jpeg(item.frame, max_side=MAX_SIDE),
-                prompt=box_prompt(brand),
-                schema_name="placement_box",
-                schema=BOX_SCHEMA,
-                validate=lambda payload: placement_from_payload(payload, w, h),
-            )
-            if not isinstance(placed, Placement):
-                return None
-            return _Cand(
-                start_s=item.start_s,
-                end_s=item.end_s,
-                frame=item.frame,
-                region=placed.region,
-                whats_there=placed.target,
-                score=placed.confidence,
-                reason=placed.reason or item.reason,
-                shot_i=item.shot_i,
-            )
-
-        verified = [c for c in _parallel(_verify, prepared) if c is not None]
-        _diag(len(verified))
-        if not verified:
-            raise _none_found()
-
-        chosen = pick_spread(verified, n, min_gap_s=min_gap)
-        if len(chosen) < min(n, len(verified)):
-            chosen = pick_spread(verified, min(n, len(verified)), min_gap_s=MIN_WINDOW_S * 0.5)
-
-        moments: list[Moment] = []
-        sheet_frames: list[np.ndarray] = []
-        for i, cand in enumerate(chosen, start=1):
-            frame_path = frames_dir / f"moment_{i:02d}.jpg"
-            cv2.imwrite(str(frame_path), cand.frame)
-            fh, fw = cand.frame.shape[:2]
-            moments.append(
-                Moment(
-                    start_s=cand.start_s,
-                    end_s=cand.end_s,
-                    frame_path=frame_path,
-                    region=cand.region,
-                    whats_there=cand.whats_there,
-                    score=cand.score,
-                    reason=cand.reason,
-                    frame_w=int(fw),
-                    frame_h=int(fh),
+            answered = _parallel(_ask, batches)
+            failed = sum(1 for result in answered if result is None)
+            hits: list[Hit] = []
+            for result in answered:
+                if result:
+                    hits.extend(result)
+            _err(f"{len(batches)} batches, {failed} failed, {len(hits)} objects")
+            if not hits and batches and failed == len(batches):
+                _diag(0)
+                raise RuntimeError(
+                    "product identification failed; no frame batch returned a valid answer"
                 )
-            )
-            sheet_frames.append(cand.frame)
+
+            shot_frames: list[list[float]] = [[] for _ in shots]
+            for kf in keyframes:
+                shot_frames[kf.shot_i].append(kf.time_s)
+            tracks = merge_hits(hits, shot_bounds, shot_frames)
+            _diag(len(tracks))
+            if not tracks:
+                raise _none_found()
+
+            cands: list[_Cand] = []
+            for track in tracks:
+                kf = keyframes[track.frame_key]
+                frame = cv2.imread(str(kf.path))
+                if frame is None:
+                    continue
+                cands.append(
+                    _Cand(
+                        start_s=track.start_s,
+                        end_s=track.end_s,
+                        frame=frame,
+                        region=track.box,
+                        whats_there=track.label,
+                        score=track.visibility,
+                        reason=_reason(track.label, track.category, track.swap_with),
+                        shot_i=track.shot_i,
+                    )
+                )
+            if not cands:
+                raise _none_found()
+
+            chosen = _pick(cands, n)
+            moments: list[Moment] = []
+            sheet_frames: list[np.ndarray] = []
+            for i, cand in enumerate(chosen, start=1):
+                frame_path = frames_dir / f"moment_{i:02d}.jpg"
+                cv2.imwrite(str(frame_path), cand.frame)
+                fh, fw = cand.frame.shape[:2]
+                moments.append(
+                    Moment(
+                        start_s=cand.start_s,
+                        end_s=cand.end_s,
+                        frame_path=frame_path,
+                        region=cand.region,
+                        whats_there=cand.whats_there,
+                        score=cand.score,
+                        reason=cand.reason,
+                        frame_w=int(fw),
+                        frame_h=int(fh),
+                    )
+                )
+                sheet_frames.append(cand.frame)
 
         sheet_path = out_dir / "contact_sheet.jpg"
         write_contact_sheet(moments, sheet_frames, sheet_path)

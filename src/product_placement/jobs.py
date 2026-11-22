@@ -83,7 +83,7 @@ def run_suggest_job(
     frames = out / "frames"
     frames.mkdir(parents=True, exist_ok=True)
     scanning = (
-        "Screening contact sheets"
+        "Finding swappable objects"
         if (os.environ.get("OPENROUTER_API_KEY") or "").strip()
         else "Scanning shots · faces · props"
     )

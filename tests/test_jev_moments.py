@@ -1,8 +1,10 @@
-"""Jev moment finder: schema parsing, tile times, and box conversion. HTTP is mocked."""
+"""Gemini product finder: prompt, 0-1000 boxes, and per-shot merge. HTTP is mocked."""
 
 from __future__ import annotations
 
+import base64
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -12,27 +14,29 @@ import numpy as np
 import pytest
 
 from product_placement.brand import Brand, BrandRules
-from product_placement.crop_stitch import probe_video
 from product_placement.jev_moments import (
+    DEFAULT_MODEL,
+    FRAMES_PER_CALL,
     OPENROUTER_URL,
-    box_prompt,
+    VISIBILITY_MIN,
     call_validated,
-    choose_layout,
-    compose_sheet,
-    fractions_to_bbox,
+    chunked,
+    finder_prompt,
+    gemini_box_to_bbox,
+    keyframe_times,
+    merge_hits,
     moment_model,
-    moment_window,
     parse_json_content,
-    placement_from_payload,
-    plan_sheets,
-    screen_prompt,
-    sheet_hits_from_payload,
-    sheet_schema,
+    parse_objects,
     suggest_with_jev,
+    track_window,
+    Hit,
 )
-from product_placement.suggest import _read_frame_at, suggest
+from product_placement.suggest import suggest
+from product_placement.vision import BBox, detect_shots
 
 _KEY = "super-secret-openrouter-key"
+_TIME = re.compile(r"Frame (\d+) at ([0-9.]+)s")
 
 
 def _jpeg() -> bytes:
@@ -41,28 +45,40 @@ def _jpeg() -> bytes:
     return buf.tobytes()
 
 
-def _box(**overrides) -> dict:
+def _client(handler) -> httpx.Client:
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _obj(**overrides) -> dict:
     raw = {
-        "target": "mug",
-        "present": True,
-        "presence": 0.9,
-        "left": 0.1,
-        "top": 0.2,
-        "right": 0.4,
-        "bottom": 0.5,
-        "confidence": 0.8,
-        "reason": "clear mug on the table",
+        "frame": 0,
+        "label": "green wine bottle",
+        "category": "bottle",
+        "swap_with": "branded wine bottle",
+        "visibility": 0.9,
+        "box_2d": [200, 100, 700, 400],
     }
     raw.update(overrides)
     return raw
 
 
-def _client(handler) -> httpx.Client:
-    return httpx.Client(transport=httpx.MockTransport(handler))
+def _hit(**overrides) -> Hit:
+    raw = dict(
+        shot_i=0,
+        time_s=1.0,
+        label="green wine bottle",
+        category="bottle",
+        swap_with="branded wine bottle",
+        visibility=0.9,
+        box=BBox(100, 80, 40, 60),
+        key=0,
+    )
+    raw.update(overrides)
+    return Hit(**raw)
 
 
 def test_parse_json_content_strips_fences_and_rejects_invalid():
-    assert parse_json_content('```json\n{"moments": []}\n```') == {"moments": []}
+    assert parse_json_content('```json\n{"objects": []}\n```') == {"objects": []}
     assert parse_json_content('```JSON\n{"a": 1}\n```') == {"a": 1}
     with pytest.raises(ValueError):
         parse_json_content("not json")
@@ -70,119 +86,322 @@ def test_parse_json_content_strips_fences_and_rejects_invalid():
         parse_json_content("```json\n{not json}\n```")
 
 
-def test_plan_sheets_maps_tiles_to_timestamps():
-    sheets = plan_sheets(61, fps=1.0, per_sheet=60)
-    assert len(sheets) == 2
-    assert sheets[0].tiles[0] == ("T01", 0.0)
-    assert sheets[0].tiles[59] == ("T60", 59.0)
-    assert sheets[0].time_of("T02") == 1.0
-    assert sheets[0].time_of("T99") is None
-    assert sheets[1].tiles == (("T01", 60.0),)
-    short = plan_sheets(3, fps=1.0, per_sheet=60)
-    assert short[0].tiles == (("T01", 0.0), ("T02", 1.0), ("T03", 2.0))
+def test_keyframe_times_are_one_per_second_and_inset_from_cuts():
+    times = keyframe_times(0.0, 10.0)
+    assert len(times) == 10
+    assert times[0] >= 0.15
+    assert times[-1] <= 10.0 - 0.15
+    assert times == sorted(times)
+    gaps = [b - a for a, b in zip(times, times[1:])]
+    assert all(0.5 <= gap <= 1.5 for gap in gaps)
+
+    short = keyframe_times(2.0, 4.0)
+    assert len(short) == 3
+    assert short[0] >= 2.15
+    assert short[-1] <= 3.85
+
+    tiny = keyframe_times(0.0, 0.25)
+    assert tiny == [0.125]
 
 
-def test_layout_and_sheet_stay_within_max_side():
-    layout = choose_layout(16 / 9, 60, 1568)
-    assert layout.cols * layout.tile_w <= 1568
-    assert layout.rows * layout.tile_h <= 1568
-    assert layout.capacity >= 60
-    assert layout.tile_w >= 2 and layout.tile_h >= 2
-    small = choose_layout(16 / 9, 4, 1568)
-    frames = [
-        np.full((small.tile_h, small.tile_w, 3), 255, np.uint8) for _ in range(4)
-    ]
-    sheet = compose_sheet(frames, ["T01", "T02", "T03", "T04"], small)
-    assert sheet.shape[0] <= 1568
-    assert sheet.shape[1] <= 1568
-    assert int(sheet[0, 0, 0]) == 0
+def test_batches_are_about_eight_frames():
+    assert [len(batch) for batch in chunked(list(range(12)), FRAMES_PER_CALL)] == [8, 4]
+    assert chunked(list(range(8)), FRAMES_PER_CALL) == [list(range(8))]
 
 
-def test_fractions_to_bbox_uses_pixel_xywh():
-    box = fractions_to_bbox(0.1, 0.2, 0.4, 0.5, 1920, 1080)
-    assert box.as_dict() == {"x": 192, "y": 216, "w": 576, "h": 324}
-    full = fractions_to_bbox(0.0, 0.0, 1.0, 1.0, 320, 180)
+def test_gemini_box_uses_ymin_xmin_ymax_xmax_on_a_0_to_1000_scale():
+    box = gemini_box_to_bbox([100, 500, 300, 900], 1000, 1000)
+    assert box.as_dict() == {"x": 500, "y": 100, "w": 400, "h": 200}
+    full = gemini_box_to_bbox([0, 0, 1000, 1000], 320, 180)
     assert full.as_dict() == {"x": 0, "y": 0, "w": 320, "h": 180}
+    clamped = gemini_box_to_bbox([-20, -10, 1200, 1500], 200, 100)
+    assert clamped.as_dict() == {"x": 0, "y": 0, "w": 200, "h": 100}
     with pytest.raises(ValueError):
-        fractions_to_bbox(0.8, 0.1, 0.2, 0.5, 100, 100)
+        gemini_box_to_bbox([100, 100, 100, 400], 100, 100)
+    tiny = gemini_box_to_bbox([200, 100, 500, 400], 10, 10)
+    assert tiny.as_dict() == {"x": 1, "y": 2, "w": 3, "h": 3}
+    collapsed = gemini_box_to_bbox([0.2, 0.1, 0.8, 0.4], 1000, 1000)
+    assert collapsed.as_dict() == {"x": 0, "y": 0, "w": 1, "h": 1}
 
 
-def test_absent_and_low_presence_drop_the_box():
-    assert placement_from_payload(_box(present=False, presence=0.99), 1920, 1080) is None
-    assert placement_from_payload(_box(present=True, presence=0.49), 100, 80) is None
-    kept = placement_from_payload(_box(present=True, presence=0.5, left=0.1, top=0.1, right=0.5, bottom=0.5), 100, 80)
-    assert kept is not None
-    assert kept.region.as_dict() == {"x": 10, "y": 8, "w": 40, "h": 32}
+def test_prompt_asks_for_existing_objects_and_a_gemini_box():
+    brand = Brand(
+        id="b",
+        name="Northstar",
+        brief="Soda can. Prefer tables.",
+        rules=BrandRules(prefer=["cups", "tables"], avoid=["beds"], placement="resting"),
+    )
+    text = finder_prompt([0.15, 1.0], brand)
+    assert "EXISTING physical objects" in text
+    assert "could swap" in text
+    assert "never empty surfaces" in text
+    assert "box_2d" in text
+    assert "[ymin, xmin, ymax, xmax]" in text
+    assert "0-1000" in text
+    assert "visibility" in text
+    assert "swap_with" in text
+    assert '"objects"' in text
+    assert "Frame 0 at 0.150s" in text
+    assert "Frame 1 at 1.000s" in text
+    assert "contact sheet" not in text.lower()
+    assert "flat surface" not in text.lower()
+    assert "Product category: Soda can" in text
+    assert "Prefer: cups, tables" in text
+    assert "Avoid: beds" in text
+    assert "Brand: Northstar" in text
+    bare = finder_prompt([1.0], None)
+    assert "Product category" not in bare
+    assert "Prefer:" not in bare
+
+
+def _xyxy(box: list[int]) -> BBox:
+    x1, y1, x2, y2 = box
+    return BBox(x1, y1, x2 - x1, y2 - y1)
+
+
+def test_parse_objects_skips_empty_surfaces_and_bad_boxes():
+    payload = {
+        "objects": [
+            _obj(),
+            _obj(label="empty tabletop", category="surface", visibility=0.99),
+            _obj(label="person", category="person", visibility=0.99),
+            _obj(label="mug", box_2d=[10, 10, 10, 40]),
+            _obj(frame=3, label="can"),
+            _obj(label="glass", visibility="high"),
+        ]
+    }
+    found = parse_objects(payload, [(640, 360)])
+    assert [item.label for item in found] == ["green wine bottle"]
+    assert found[0].box.as_dict() == gemini_box_to_bbox(
+        [200, 100, 700, 400], 640, 360
+    ).as_dict()
+    assert found[0].swap_with == "branded wine bottle"
     with pytest.raises(ValueError):
-        placement_from_payload(_box(present="yes"), 100, 100)
-    with pytest.raises(ValueError):
-        placement_from_payload(_box(left=0.9, right=0.2), 100, 100)
+        parse_objects({"moments": []}, [(10, 10)])
 
 
-def test_fenced_sheet_response_maps_tile_time():
-    plan = plan_sheets(3, fps=1.0)[0]
-    seen: list[httpx.Request] = []
-    body = "```json\n" + json.dumps(
-        {"moments": [{"tile": "T02", "score": 0.8, "reason": "clear table"}]}
-    ) + "\n```"
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return httpx.Response(200, json={"choices": [{"message": {"content": body}}]})
-
-    with _client(handler) as client:
-        hits = call_validated(
-            client,
-            key=_KEY,
-            image=_jpeg(),
-            prompt=screen_prompt(plan, None),
-            schema_name="placement_sheet",
-            schema=sheet_schema([tid for tid, _ in plan.tiles]),
-            validate=lambda payload: sheet_hits_from_payload(payload, plan),
-            model="typesafe/jev-router",
+def test_suits_tracks_use_category_overlap_and_shot_midpoints():
+    """Timing and merge from the validated Suits clip (wine bottle spans 2.0–4.0s)."""
+    shot2 = (2.002, 3.962)
+    frames2 = [2.152, 2.982, 3.812]
+    bottle_boxes = (
+        (2.152, [1048, 435, 1137, 807], "green wine bottle"),
+        (2.982, [1046, 435, 1142, 849], "wine bottle"),
+        (3.812, [1046, 436, 1137, 823], "green wine bottle"),
+    )
+    glass_a = (
+        (2.152, [818, 563, 952, 924]),
+        (2.982, [820, 563, 954, 924]),
+        (3.812, [818, 563, 954, 921]),
+    )
+    glass_b = (
+        (2.152, [1073, 548, 1204, 885]),
+        (2.982, [1071, 548, 1202, 889]),
+        (3.812, [1071, 548, 1202, 883]),
+    )
+    plate = [557, 723, 929, 851]
+    steak = [600, 750, 800, 820]
+    hits: list[Hit] = []
+    key = 0
+    for t, box, label in bottle_boxes:
+        hits.append(
+            _hit(
+                shot_i=1,
+                time_s=t,
+                label=label,
+                category="bottle",
+                visibility=0.85,
+                box=_xyxy(box),
+                key=key,
+                swap_with="branded wine bottle",
+            )
         )
-    assert len(hits) == 1
-    assert hits[0].tile == "T02"
-    assert hits[0].time_s == 1.0
-    assert hits[0].reason == "clear table"
-    request = seen[0]
-    assert str(request.url) == OPENROUTER_URL
-    payload = json.loads(request.content)
-    assert payload["model"] == "typesafe/jev-router"
-    assert payload["response_format"]["json_schema"]["strict"] is True
-    enum = payload["response_format"]["json_schema"]["schema"]["properties"]["moments"]["items"][
-        "properties"
-    ]["tile"]["enum"]
-    assert enum == ["T01", "T02", "T03"]
-    url = payload["messages"][0]["content"][1]["image_url"]["url"]
-    assert url.startswith("data:image/jpeg;base64,")
-    assert request.headers["authorization"] == f"Bearer {_KEY}"
+        key += 1
+    for t, box in glass_a:
+        hits.append(
+            _hit(
+                shot_i=1,
+                time_s=t,
+                label="wine glass with red wine",
+                category="wine_glass",
+                visibility=0.8,
+                box=_xyxy(box),
+                key=key,
+                swap_with="branded wine glass",
+            )
+        )
+        key += 1
+    for t, box in glass_b:
+        hits.append(
+            _hit(
+                shot_i=1,
+                time_s=t,
+                label="red wine glass",
+                category="wine_glass",
+                visibility=0.75,
+                box=_xyxy(box),
+                key=key,
+            )
+        )
+        key += 1
+    hits.append(
+        _hit(
+            shot_i=1,
+            time_s=2.152,
+            label="plate with steak",
+            category="plate",
+            visibility=0.7,
+            box=_xyxy(plate),
+            key=key,
+        )
+    )
+    key += 1
+    hits.append(
+        _hit(
+            shot_i=1,
+            time_s=2.152,
+            label="steak",
+            category="food",
+            visibility=0.9,
+            box=_xyxy(steak),
+            key=key,
+        )
+    )
+    key += 1
+    hits.append(
+        _hit(
+            shot_i=1,
+            time_s=2.982,
+            label="wristwatch",
+            category="other",
+            visibility=0.45,
+            box=_xyxy([770, 455, 839, 516]),
+            key=key,
+            swap_with="luxury watch",
+        )
+    )
+    key += 1
+    hits.append(
+        _hit(
+            shot_i=1,
+            time_s=2.152,
+            label="waiter bill folder",
+            category="other",
+            visibility=0.25,
+            box=_xyxy([1450, 359, 1605, 604]),
+            key=key,
+        )
+    )
+    tracks = merge_hits(hits, [(0.0, 2.002), shot2], [[0.15, 1.001, 1.852], frames2])
+    by_label = {track.label: track for track in tracks}
+    assert "waiter bill folder" not in by_label
+    assert "steak" not in by_label
+    bottle = by_label["green wine bottle"]
+    assert bottle.sightings == 3
+    assert bottle.category == "bottle"
+    assert bottle.start_s == pytest.approx(2.002)
+    assert bottle.end_s == pytest.approx(3.962)
+    assert bottle.visibility == pytest.approx(0.85)
+    assert bottle.box.as_dict() == _xyxy(bottle_boxes[0][1]).as_dict()
+    assert bottle.frame_key == 0
+    assert by_label["wine glass with red wine"].start_s == pytest.approx(2.002)
+    assert by_label["red wine glass"].start_s == pytest.approx(2.002)
+    assert by_label["wine glass with red wine"].end_s == pytest.approx(3.962)
+    assert by_label["red wine glass"].end_s == pytest.approx(3.962)
+    watch = by_label["wristwatch"]
+    assert watch.sightings == 1
+    assert watch.visibility >= VISIBILITY_MIN
+    assert watch.start_s == pytest.approx(2.567)
+    assert watch.end_s == pytest.approx(3.397)
+    plate_track = by_label["plate with steak"]
+    assert plate_track.category == "plate"
+    assert plate_track.sightings == 1
 
 
-def test_message_content_list_and_retry_then_success():
+def test_inner_food_is_dropped_when_listed_before_its_plate():
+    plate = _xyxy([557, 723, 929, 851])
+    steak = _xyxy([600, 750, 800, 820])
+    hits = [
+        _hit(
+            shot_i=0,
+            time_s=1.0,
+            label="steak",
+            category="food",
+            visibility=0.9,
+            box=steak,
+            key=0,
+        ),
+        _hit(
+            shot_i=0,
+            time_s=1.0,
+            label="plate with steak",
+            category="plate",
+            visibility=0.7,
+            box=plate,
+            key=1,
+        ),
+    ]
+    tracks = merge_hits(hits, [(0.0, 2.0)], [[0.15, 1.0, 1.85]])
+    assert [track.label for track in tracks] == ["plate with steak"]
+
+
+def test_track_window_uses_shot_edges_and_midpoints():
+    frames = [2.152, 2.982, 3.812]
+    assert track_window([2.152, 3.812], frames, 2.002, 3.962) == (2.002, 3.962)
+    assert track_window([2.982], frames, 2.002, 3.962) == (2.567, 3.397)
+    assert track_window([1.852], [0.15, 1.001, 1.852], 0.0, 2.002) == (1.426, 2.002)
+    assert track_window([4.112], [4.112, 5.262, 6.411], 3.962, 10.01) == (
+        3.962,
+        round((4.112 + 5.262) / 2, 3),
+    )
+
+
+def test_moment_model_env(monkeypatch):
+    monkeypatch.delenv("MOMENT_MODEL", raising=False)
+    assert moment_model() == DEFAULT_MODEL
+    assert DEFAULT_MODEL == "google/gemini-3.8-flash"
+    monkeypatch.setenv("MOMENT_MODEL", "google/custom")
+    assert moment_model() == "google/custom"
+    monkeypatch.setenv("MOMENT_MODEL", "  ")
+    assert moment_model() == DEFAULT_MODEL
+
+
+def test_call_sends_frames_with_low_reasoning_and_retries_invalid_json():
     calls = {"n": 0}
+    seen: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
+        body = json.loads(request.content)
+        seen.append(body)
         if calls["n"] == 1:
-            content = "```json\n{bad}\n```"
-        else:
-            content = [{"type": "text", "text": '{"moments": []}'}]
+            return httpx.Response(500, text=f"denied {_KEY}")
+        content = [{"type": "text", "text": json.dumps({"objects": [_obj(frame=1)]})}]
         return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
-    plan = plan_sheets(1)[0]
     with _client(handler) as client:
-        hits = call_validated(
+        found = call_validated(
             client,
             key=_KEY,
-            image=_jpeg(),
-            prompt="x",
-            schema_name="placement_sheet",
-            schema={"type": "object"},
-            validate=lambda payload: sheet_hits_from_payload(payload, plan),
+            images=[_jpeg(), _jpeg()],
+            prompt=finder_prompt([0.15, 1.0], None),
+            schema_name="products",
+            validate=lambda payload: parse_objects(payload, [(80, 40), (80, 40)]),
+            model=DEFAULT_MODEL,
         )
-    assert hits == []
     assert calls["n"] == 2
+    assert len(found) == 1
+    assert found[0].frame == 1
+    body = seen[1]
+    request_body = seen[0]
+    assert request_body["model"] == DEFAULT_MODEL
+    assert request_body["reasoning"] == {"effort": "low"}
+    assert request_body["response_format"] == {"type": "json_object"}
+    parts = request_body["messages"][0]["content"]
+    images = [part for part in parts if part["type"] == "image_url"]
+    assert len(images) == 2
+    assert images[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert body["messages"][0]["content"][0]["text"].startswith("You are finding EXISTING")
 
 
 def test_invalid_json_retries_once_then_skips(capsys):
@@ -190,17 +409,16 @@ def test_invalid_json_retries_once_then_skips(capsys):
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        return httpx.Response(500, text=f"denied {_KEY}")
+        return httpx.Response(500, text=f"not json {_KEY}")
 
     with _client(handler) as client:
         result = call_validated(
             client,
             key=_KEY,
-            image=_jpeg(),
+            images=[_jpeg()],
             prompt="x",
-            schema_name="placement_box",
-            schema={"type": "object"},
-            validate=lambda payload: placement_from_payload(payload, 10, 10),
+            schema_name="products",
+            validate=lambda payload: parse_objects(payload, [(8, 8)]),
         )
     assert result is None
     assert calls["n"] == 2
@@ -208,54 +426,6 @@ def test_invalid_json_retries_once_then_skips(capsys):
     assert captured.out == ""
     assert _KEY not in captured.err
     assert "[redacted]" in captured.err
-
-
-def test_call_drops_absent_target_without_retry():
-    calls = {"n": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": json.dumps(_box(present=False, presence=0.99))}}]},
-        )
-
-    with _client(handler) as client:
-        result = call_validated(
-            client,
-            key=_KEY,
-            image=_jpeg(),
-            prompt=box_prompt(None),
-            schema_name="placement_box",
-            schema={"type": "object"},
-            validate=lambda payload: placement_from_payload(payload, 200, 100),
-        )
-    assert result is None
-    assert calls["n"] == 1
-
-
-def test_brand_hint_is_in_both_prompts():
-    brand = Brand(
-        id="b",
-        name="Northstar",
-        brief="Soda can. Prefer tables.",
-        rules=BrandRules(prefer=["cups", "tables"], avoid=["beds"], placement="resting"),
-    )
-    plan = plan_sheets(2)[0]
-    for text in (screen_prompt(plan, brand), box_prompt(brand)):
-        assert "Product category: Soda can" in text
-        assert "Prefer: cups, tables" in text
-        assert "Avoid: beds" in text
-        assert "Brand: Northstar" in text
-    assert "Product category" not in screen_prompt(plan, None)
-    assert "Prefer:" not in box_prompt(None)
-
-
-def test_moment_model_env(monkeypatch):
-    monkeypatch.setenv("MOMENT_MODEL", "typesafe/custom")
-    assert moment_model() == "typesafe/custom"
-    monkeypatch.setenv("MOMENT_MODEL", "  ")
-    assert moment_model() == "typesafe/jev-router"
 
 
 def test_suggest_dispatches_to_jev_when_key_set(monkeypatch):
@@ -312,95 +482,8 @@ def _write_static_mp4(path: Path, *, seconds: float = 12.0, fps: float = 24.0) -
     return path
 
 
-def test_suggest_with_jev_mocked_end_to_end(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("OPENROUTER_API_KEY", _KEY)
-    monkeypatch.setenv("MOMENT_MODEL", "typesafe/jev-router")
-    video = _write_static_mp4(tmp_path / "clip.mp4")
-    _, _, duration, _ = probe_video(video)
-    assert duration > 5
-    brand = Brand(
-        id="b",
-        name="Northstar",
-        brief="Soda can. Prefer tables.",
-        rules=BrandRules(prefer=["cups"], avoid=["beds"]),
-    )
-    seen: list[dict] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        body = json.loads(request.content)
-        seen.append(
-            {
-                "auth": request.headers["authorization"],
-                "body": body,
-            }
-        )
-        text = body["messages"][0]["content"][0]["text"]
-        if "Valid tile ids" in text:
-            content = (
-                "```json\n"
-                + json.dumps(
-                    {"moments": [{"tile": "T06", "score": 0.91, "reason": "clear table"}]}
-                )
-                + "\n```"
-            )
-        else:
-            content = json.dumps(
-                _box(
-                    target="wooden table",
-                    present=True,
-                    presence=0.88,
-                    left=0.25,
-                    top=0.25,
-                    right=0.75,
-                    bottom=0.75,
-                    confidence=0.77,
-                    reason="flat surface, no face",
-                )
-            )
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
-
-    with _client(handler) as client:
-        moments = suggest_with_jev(
-            video,
-            n=5,
-            out_dir=tmp_path / "out",
-            brand=brand,
-            client=client,
-        )
-
-    assert len(seen) == 2
-    assert all(item["auth"] == f"Bearer {_KEY}" for item in seen)
-    screen_text = seen[0]["body"]["messages"][0]["content"][0]["text"]
-    box_text = seen[1]["body"]["messages"][0]["content"][0]["text"]
-    assert "T06" in screen_text
-    assert "Product category: Soda can" in screen_text
-    assert "Avoid: beds" in box_text
-    assert seen[0]["body"]["model"] == "typesafe/jev-router"
-    assert seen[1]["body"]["response_format"]["type"] == "json_schema"
-
-    assert len(moments) == 1
-    moment = moments[0]
-    assert moment.whats_there == "wooden table"
-    assert moment.score == pytest.approx(0.77)
-    assert moment.reason == "flat surface, no face"
-    assert moment.start_s == pytest.approx(moment_window(5.0, duration, 5.0)[0])
-    assert moment.end_s == pytest.approx(moment_window(5.0, duration, 5.0)[1])
-    assert moment.start_s != pytest.approx(moment_window(0.0, duration, 5.0)[0])
-    assert moment.region.as_dict() == fractions_to_bbox(
-        0.25, 0.25, 0.75, 0.75, moment.frame_w, moment.frame_h
-    ).as_dict()
-    assert moment.frame_path.is_file()
-    saved = json.loads((tmp_path / "out" / "moments.json").read_text())
-    assert saved["moments"][0]["region"] == moment.region.as_dict()
-    assert saved["brand_id"] == "b"
-    assert (tmp_path / "out" / "contact_sheet.jpg").is_file()
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert _KEY not in captured.err
-
-
 def _write_cut_mp4(path: Path) -> Path:
-    """10s clip, cuts at 2s and 4s. In-shot motion is flat; a window across a cut is not."""
+    """10s clip, cuts at 2s and 4s."""
     path.parent.mkdir(parents=True, exist_ok=True)
     raw = path.with_name(path.stem + "_mp4v.mp4")
     w, h, fps = 640, 360, 24.0
@@ -453,45 +536,131 @@ def _center_channel(frame: np.ndarray) -> int:
     return int(np.argmax(crop.mean(axis=(0, 1))))
 
 
-def test_jev_windows_stay_inside_the_shot(tmp_path, monkeypatch, capsys):
+def _frame_times(text: str) -> list[tuple[int, float]]:
+    return [(int(i), float(t)) for i, t in _TIME.findall(text)]
+
+
+def test_suggest_with_jev_mocked_end_to_end(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OPENROUTER_API_KEY", _KEY)
+    monkeypatch.delenv("MOMENT_MODEL", raising=False)
     video = _write_cut_mp4(tmp_path / "cuts.mp4")
-    shot_channel = {0: 2, 1: 1, 2: 0}
-    bounds = ((0.0, 2.0), (2.0, 4.0), (4.0, 10.0))
+    cap = cv2.VideoCapture(str(video))
+    try:
+        shots = detect_shots(cap)
+    finally:
+        cap.release()
+    assert len(shots) == 3
+    sampled = [keyframe_times(shot.start_s, shot.end_s) for shot in shots]
+    bottle_times = sampled[2][:2]
+    phone_time = sampled[1][0]
+    mug_time = sampled[2][-1]
+    assert len(bottle_times) == 2
+    assert mug_time not in bottle_times
+    brand = Brand(
+        id="b",
+        name="Northstar",
+        brief="Soda can. Prefer tables.",
+        rules=BrandRules(prefer=["cups"], avoid=["beds"]),
+    )
+    seen: list[dict] = []
+    bottle_box = [400, 280, 780, 430]
+    phone_box = [120, 500, 360, 700]
 
     def handler(request: httpx.Request) -> httpx.Response:
-        text = json.loads(request.content)["messages"][0]["content"][0]["text"]
-        if "Valid tile ids" in text:
-            content = json.dumps(
-                {
-                    "moments": [
-                        {"tile": "T02", "score": 0.91, "reason": "clear table"},
-                        {"tile": "T04", "score": 0.8, "reason": "clear shelf"},
-                        {"tile": "T06", "score": 0.7, "reason": "clear desk"},
-                    ]
-                }
-            )
-        else:
-            content = json.dumps(
-                _box(
-                    target="tabletop",
-                    present=True,
-                    presence=0.9,
-                    left=0.2,
-                    top=0.2,
-                    right=0.6,
-                    bottom=0.6,
-                    confidence=0.7,
-                    reason="flat surface",
+        body = json.loads(request.content)
+        text = body["messages"][0]["content"][0]["text"]
+        images = [part for part in body["messages"][0]["content"] if part["type"] == "image_url"]
+        seen.append({"auth": request.headers["authorization"], "body": body, "images": len(images)})
+        objects = []
+        for index, t in _frame_times(text):
+            if any(abs(t - sample) < 0.02 for sample in bottle_times):
+                first = abs(t - bottle_times[0]) <= abs(t - bottle_times[1])
+                objects.append(
+                    _obj(
+                        frame=index,
+                        label="green wine bottle" if first else "wine bottle",
+                        visibility=0.92 if first else 0.8,
+                        box_2d=bottle_box,
+                    )
                 )
-            )
-        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+            elif abs(t - phone_time) < 0.02:
+                objects.append(
+                    _obj(
+                        frame=index,
+                        label="black phone",
+                        category="phone",
+                        swap_with="branded phone",
+                        visibility=0.75,
+                        box_2d=phone_box,
+                    )
+                )
+            elif abs(t - mug_time) < 0.02:
+                objects.append(
+                    _obj(
+                        frame=index,
+                        label="coffee mug",
+                        category="cup",
+                        swap_with="branded mug",
+                        visibility=0.1,
+                        box_2d=[10, 10, 80, 80],
+                    )
+                )
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": json.dumps({"objects": objects})}}]}
+        )
 
     with _client(handler) as client:
-        moments = suggest_with_jev(video, n=5, out_dir=tmp_path / "out", client=client)
+        moments = suggest_with_jev(
+            video,
+            n=5,
+            out_dir=tmp_path / "out",
+            brand=brand,
+            client=client,
+        )
 
-    assert len(moments) == 3
-    seen = set()
+    assert seen
+    assert all(item["auth"] == f"Bearer {_KEY}" for item in seen)
+    assert all(item["images"] <= FRAMES_PER_CALL for item in seen)
+    total_frames = sum(len(times) for times in sampled)
+    assert sum(item["images"] for item in seen) == total_frames
+    if total_frames > FRAMES_PER_CALL:
+        assert any(item["images"] == FRAMES_PER_CALL for item in seen)
+    for item in seen:
+        body = item["body"]
+        assert body["model"] == "google/gemini-3.8-flash"
+        assert body["reasoning"] == {"effort": "low"}
+        assert body["response_format"]["type"] == "json_object"
+        prompt = body["messages"][0]["content"][0]["text"]
+        assert "EXISTING physical objects" in prompt
+        assert "contact sheet" not in prompt.lower()
+        assert "Product category: Soda can" in prompt
+        assert "Avoid: beds" in prompt
+        raw = body["messages"][0]["content"][1]["image_url"]["url"].split(",", 1)[1]
+        frame = cv2.imdecode(np.frombuffer(base64.b64decode(raw), np.uint8), cv2.IMREAD_COLOR)
+        assert frame is not None
+        assert frame.shape[1] == 640 and frame.shape[0] == 360
+
+    by_label = {m.whats_there: m for m in moments}
+    assert set(by_label) == {"green wine bottle", "black phone"}
+    bottle = by_label["green wine bottle"]
+    phone = by_label["black phone"]
+    assert "coffee mug" not in by_label
+    assert bottle.score == pytest.approx((0.92 + 0.8) / 2)
+    assert "swap with branded wine bottle" in bottle.reason
+    assert bottle.region.as_dict() == gemini_box_to_bbox(bottle_box, 640, 360).as_dict()
+    assert phone.region.as_dict() == gemini_box_to_bbox(phone_box, 640, 360).as_dict()
+    phone_window = track_window(
+        [phone_time], sampled[1], shots[1].start_s, shots[1].end_s
+    )
+    bottle_window = track_window(
+        bottle_times, sampled[2], shots[2].start_s, shots[2].end_s
+    )
+    assert (phone.start_s, phone.end_s) == pytest.approx(phone_window)
+    assert (bottle.start_s, bottle.end_s) == pytest.approx(bottle_window)
+    assert bottle.end_s > bottle.start_s
+
+    bounds = [(shot.start_s, shot.end_s) for shot in shots]
+    assert len(bounds) == 3
     for moment in moments:
         owners = [
             i
@@ -499,22 +668,16 @@ def test_jev_windows_stay_inside_the_shot(tmp_path, monkeypatch, capsys):
             if moment.start_s >= start - 1e-3 and moment.end_s <= end + 1e-3
         ]
         assert owners, (moment.start_s, moment.end_s)
-        assert not any(moment.start_s < cut < moment.end_s for cut in (2.0, 4.0))
-        assert moment.end_s - moment.start_s <= 5.0 + 1e-3
+        assert not any(moment.start_s < cut < moment.end_s for cut in (bounds[1][0], bounds[2][0]))
         frame = cv2.imread(str(moment.frame_path))
         assert frame is not None
-        assert _center_channel(frame) == shot_channel[owners[0]]
-        seen.add(owners[0])
-    assert seen == {0, 1, 2}
-    cap = cv2.VideoCapture(str(video))
-    try:
-        inside = _read_frame_at(cap, 1.999, lo_s=0.0, hi_s=2.0)
-    finally:
-        cap.release()
-    assert inside is not None
-    assert _center_channel(inside) == shot_channel[0]
+        assert _center_channel(frame) == {0: 2, 1: 1, 2: 0}[owners[0]]
+    saved = json.loads((tmp_path / "out" / "moments.json").read_text())
+    assert saved["moments"][0]["whats_there"] == moments[0].whats_there
+    assert saved["brand_id"] == "b"
+    assert (tmp_path / "out" / "contact_sheet.jpg").is_file()
     captured = capsys.readouterr()
-    assert _KEY not in captured.out
+    assert captured.out == ""
     assert _KEY not in captured.err
 
 
