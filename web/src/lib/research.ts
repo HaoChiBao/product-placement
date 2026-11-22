@@ -34,6 +34,18 @@ export type BrandProfile = {
   avoid: string[]
 }
 
+/** A cleaned product image the research job saved as `candidate_<n>.png` (best first). */
+export type ResearchImage = {
+  name: string
+  source: "agent" | "shopify" | "img"
+  url: string
+  w: number
+  h: number
+  /** True when the background was removed (transparent PNG). */
+  cutout: boolean
+  score: number
+}
+
 /** `DATA_DIR/jobs/<id>/status.json` written by `product_placement.jobs brand-research`. */
 export type ResearchJob = {
   id: string
@@ -45,6 +57,7 @@ export type ResearchJob = {
   sources: ResearchSource[]
   detail?: string
   profile: BrandProfile | null
+  images?: ResearchImage[]
   error?: string
   tinyfish_run_id?: string | null
   streaming_url?: string | null

@@ -10,6 +10,7 @@ import { session } from "@/lib/catalog-client"
 const STEPS = [
   ["onboard", "Your product"],
   ["research", "Brand research"],
+  ["image", "Product image"],
   ["videos", "Choose a video"],
   ["review", "Review placements"],
 ] as const

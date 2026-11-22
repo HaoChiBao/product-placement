@@ -1,7 +1,7 @@
 "use client"
 
 import { useSearchParams } from "next/navigation"
-import { Suspense, useEffect, useMemo, useRef, useState } from "react"
+import { Suspense, useEffect, useMemo, useState } from "react"
 
 import { TextEffect } from "@/components/motion-primitives/text-effect"
 import { TextShimmer } from "@/components/motion-primitives/text-shimmer"
@@ -10,8 +10,7 @@ import { TopBar } from "@/components/top-bar"
 import { Button, ButtonLink } from "@/components/ui/button"
 import { RollingNumber } from "@/components/ui/rolling-number"
 import { PageShell } from "@/components/ui/page-shell"
-import { createBrand, session } from "@/lib/catalog-client"
-import { takePendingAsset } from "@/lib/pending-asset"
+import { peekPendingAsset } from "@/lib/pending-asset"
 import {
   briefFor,
   forgetResearch,
@@ -50,15 +49,16 @@ function Research() {
   const [profile, setProfile] = useState<BrandProfile | null>(null)
   const [error, setError] = useState("")
   const [attempt, setAttempt] = useState(0)
-  const asset = useRef<File | null | undefined>(undefined)
+  const [jobId, setJobId] = useState("")
 
   useEffect(() => {
-    if (asset.current === undefined) asset.current = takePendingAsset()
     let cancelled = false
     ;(async () => {
       setError("")
       setStepIdx(0)
       setSources(0)
+      setProfile(null)
+      setJobId("")
       let p: BrandProfile
       let n = mockSteps.length
       let started: { jobId: string } | { mock: true } = { mock: true }
@@ -95,7 +95,7 @@ function Research() {
         forgetResearch(input, attempt)
         p = job.profile!
         n = job.steps.length
-        setStepIdx(n - 1)
+        setJobId(started.jobId)
       } else {
         // No TinyFish key on the server (or ?mock=1): simulate the research steps.
         setLive(null)
@@ -113,18 +113,11 @@ function Research() {
         }
         if (cancelled) return
         setSources(mockSources.length)
-        setStepIdx(mockSteps.length - 1)
         p = research.profile(input)
       }
-      try {
-        const brand = await createBrand(p.business, briefFor(p, input.note), asset.current)
-        if (cancelled) return
-        session.set({ brandId: brand.id, profile: p, hasAsset: Boolean(asset.current) })
-        setStepIdx(n)
-        setProfile(p)
-      } catch (e) {
-        if (!cancelled) setError(`Couldn’t save the brand profile: ${e instanceof Error ? e.message : String(e)}`)
-      }
+      // The brand is saved on the next step, once a product image is chosen.
+      setStepIdx(n)
+      setProfile(p)
     })()
     return () => {
       cancelled = true
@@ -132,13 +125,20 @@ function Research() {
   }, [attempt, forceMock, mockSteps, mockSources, input])
 
   const done = Boolean(profile)
+  const imageStepHref = useMemo(() => {
+    const q = new URLSearchParams(params.toString())
+    if (jobId) q.set("job", jobId)
+    else q.delete("job")
+    return `/product-image?${q}`
+  }, [params, jobId])
   const pct = steps.length ? Math.min(100, (stepIdx / steps.length) * 100) : 0
   const current = steps[Math.min(stepIdx, steps.length - 1)]
 
-  // Preview of the uploaded product image for the board.
+  // Preview of the uploaded product image for the board. Peek, don't take:
+  // the product-image step claims the file and saves it with the brand.
   const [productImage, setProductImage] = useState<string | null>(null)
   useEffect(() => {
-    const file = asset.current
+    const file = peekPendingAsset()
     if (!file) return
     const url = URL.createObjectURL(file)
     setProductImage(url)
@@ -162,8 +162,8 @@ function Research() {
             </TextEffect>
             <p className="mt-2 max-w-[60ch] text-muted-foreground">
               {done
-                ? "This is how we’ll keep every placement on-brand. Happy with it? Pick a video next."
-                : "We’re reading your site and socials and pinning what we find. This usually takes under a minute."}
+                ? "This is how we’ll keep every placement on-brand. Happy with it? Pick a product image next."
+                : "We’re reading your site and socials, pinning what we find, and looking for a clean product image. This usually takes a minute or two."}
             </p>
           </div>
           {done ? (
@@ -171,8 +171,8 @@ function Research() {
               <ButtonLink href="/" variant="secondary">
                 Edit
               </ButtonLink>
-              <ButtonLink href="/videos" variant="primary" size="lg">
-                Browse creator videos →
+              <ButtonLink href={imageStepHref} variant="primary" size="lg">
+                Looks right →
               </ButtonLink>
             </div>
           ) : null}
@@ -188,7 +188,7 @@ function Research() {
                 </Button>
               </span>
             ) : done ? (
-              <span className="text-success-foreground">Brand profile saved</span>
+              <span className="text-success-foreground">Brand profile ready</span>
             ) : (
               <TextShimmer className="font-medium" duration={1.4}>
                 {current ? `${current.label}…` : "Starting…"}
