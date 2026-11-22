@@ -30,7 +30,7 @@ from product_placement.jev_moments import (
     sheet_schema,
     suggest_with_jev,
 )
-from product_placement.suggest import suggest
+from product_placement.suggest import _read_frame_at, suggest
 
 _KEY = "super-secret-openrouter-key"
 
@@ -397,3 +397,188 @@ def test_suggest_with_jev_mocked_end_to_end(tmp_path, monkeypatch, capsys):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert _KEY not in captured.err
+
+
+def _write_cut_mp4(path: Path) -> Path:
+    """10s clip, cuts at 2s and 4s. In-shot motion is flat; a window across a cut is not."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    raw = path.with_name(path.stem + "_mp4v.mp4")
+    w, h, fps = 640, 360, 24.0
+    rng = np.random.default_rng(1)
+    noise = rng.integers(0, 255, (h, w), dtype=np.uint8)
+    by, bx = int(h * 0.18), int(w * 0.18)
+    shots = (
+        (0.0, 2.0, 0, (20, 20, 210)),
+        (2.0, 4.0, 240, (20, 190, 40)),
+        (4.0, 10.0, 0, (210, 150, 20)),
+    )
+    writer = cv2.VideoWriter(str(raw), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
+    assert writer.isOpened()
+    for i in range(int(10 * fps)):
+        t = i / fps
+        for start, end, shift, color in shots:
+            if start <= t < end:
+                border = np.roll(noise, shift, axis=1)
+                frame = np.full((h, w, 3), color, np.uint8)
+                for c in range(3):
+                    frame[:by, :, c] = border[:by]
+                    frame[-by:, :, c] = border[-by:]
+                    frame[:, :bx, c] = border[:, :bx]
+                    frame[:, -bx:, c] = border[:, -bx:]
+                writer.write(frame)
+                break
+    writer.release()
+    subprocess.check_call(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(raw),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            str(path),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return path
+
+
+def _center_channel(frame: np.ndarray) -> int:
+    h, w = frame.shape[:2]
+    crop = frame[int(h * 0.3) : int(h * 0.7), int(w * 0.3) : int(w * 0.7)]
+    return int(np.argmax(crop.mean(axis=(0, 1))))
+
+
+def test_jev_windows_stay_inside_the_shot(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OPENROUTER_API_KEY", _KEY)
+    video = _write_cut_mp4(tmp_path / "cuts.mp4")
+    shot_channel = {0: 2, 1: 1, 2: 0}
+    bounds = ((0.0, 2.0), (2.0, 4.0), (4.0, 10.0))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        text = json.loads(request.content)["messages"][0]["content"][0]["text"]
+        if "Valid tile ids" in text:
+            content = json.dumps(
+                {
+                    "moments": [
+                        {"tile": "T02", "score": 0.91, "reason": "clear table"},
+                        {"tile": "T04", "score": 0.8, "reason": "clear shelf"},
+                        {"tile": "T06", "score": 0.7, "reason": "clear desk"},
+                    ]
+                }
+            )
+        else:
+            content = json.dumps(
+                _box(
+                    target="tabletop",
+                    present=True,
+                    presence=0.9,
+                    left=0.2,
+                    top=0.2,
+                    right=0.6,
+                    bottom=0.6,
+                    confidence=0.7,
+                    reason="flat surface",
+                )
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    with _client(handler) as client:
+        moments = suggest_with_jev(video, n=5, out_dir=tmp_path / "out", client=client)
+
+    assert len(moments) == 3
+    seen = set()
+    for moment in moments:
+        owners = [
+            i
+            for i, (start, end) in enumerate(bounds)
+            if moment.start_s >= start - 1e-3 and moment.end_s <= end + 1e-3
+        ]
+        assert owners, (moment.start_s, moment.end_s)
+        assert not any(moment.start_s < cut < moment.end_s for cut in (2.0, 4.0))
+        assert moment.end_s - moment.start_s <= 5.0 + 1e-3
+        frame = cv2.imread(str(moment.frame_path))
+        assert frame is not None
+        assert _center_channel(frame) == shot_channel[owners[0]]
+        seen.add(owners[0])
+    assert seen == {0, 1, 2}
+    cap = cv2.VideoCapture(str(video))
+    try:
+        inside = _read_frame_at(cap, 1.999, lo_s=0.0, hi_s=2.0)
+    finally:
+        cap.release()
+    assert inside is not None
+    assert _center_channel(inside) == shot_channel[0]
+    captured = capsys.readouterr()
+    assert _KEY not in captured.out
+    assert _KEY not in captured.err
+
+
+class _Det:
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def detect(self, frame):
+        return []
+
+
+def _moment_sig(moments):
+    return [
+        (
+            round(m.start_s, 3),
+            round(m.end_s, 3),
+            m.whats_there,
+            m.region.as_dict(),
+            round(m.score, 4),
+        )
+        for m in moments
+    ]
+
+
+@pytest.mark.parametrize("failure", ["empty", "error"])
+def test_suggest_falls_back_to_cv_when_jev_fails(failure, tmp_path, monkeypatch, capsys):
+    video = _write_static_mp4(tmp_path / "clip.mp4", seconds=3.0)
+    monkeypatch.setattr("product_placement.suggest.FaceDetector", _Det)
+    monkeypatch.setattr("product_placement.suggest.YoloX", _Det)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    classical = suggest(
+        video,
+        n=4,
+        out_dir=tmp_path / "cv",
+        yunet_path="yunet.onnx",
+        yolox_path="yolox.onnx",
+    )
+    assert classical
+
+    def empty(*args, **kwargs):
+        return []
+
+    def explode(*args, **kwargs):
+        raise RuntimeError(f"router down {_KEY}")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", _KEY)
+    monkeypatch.setattr(
+        "product_placement.jev_moments.suggest_with_jev",
+        empty if failure == "empty" else explode,
+    )
+    got = suggest(
+        video,
+        n=4,
+        out_dir=tmp_path / "fallback",
+        yunet_path="yunet.onnx",
+        yolox_path="yolox.onnx",
+    )
+    assert _moment_sig(got) == _moment_sig(classical)
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert _KEY not in captured.err
+    assert "[suggest] Jev fallback:" in captured.err
+    if failure == "empty":
+        assert "no moments" in captured.err
+    else:
+        assert "router down" in captured.err
+        assert "[redacted]" in captured.err
