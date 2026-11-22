@@ -423,7 +423,9 @@ def read_cache(website: str, product: str, *, now: float | None = None) -> dict[
         return None
     age = (now if now is not None else time.time()) - float(entry.get("saved_at") or 0)
     profile = entry.get("profile")
-    if age < CACHE_TTL_S and isinstance(profile, dict):
+    # Entries saved before the agent was asked for an image have no "image_url"
+    # key; treat them as stale so the next run asks for one.
+    if age < CACHE_TTL_S and isinstance(profile, dict) and "image_url" in entry:
         return entry
     return None
 
