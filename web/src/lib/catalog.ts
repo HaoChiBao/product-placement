@@ -1,0 +1,71 @@
+import { spawnSync } from "child_process"
+import fs from "fs"
+import path from "path"
+
+import { dataRoot, pythonBin, pythonEnv, repoRoot, spawnJob } from "@/lib/runs"
+
+export function catalogCmd(args: string[]): unknown {
+  const res = spawnSync(pythonBin(), ["-m", "product_placement.catalog", ...args], {
+    cwd: repoRoot(),
+    env: pythonEnv(),
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+  })
+  if (res.status !== 0) {
+    const err = (res.stderr || res.stdout || "catalog command failed").trim()
+    throw new Error(err.slice(-2000))
+  }
+  const text = (res.stdout || "").trim()
+  if (!text) return null
+  return JSON.parse(text)
+}
+
+export function ensureCatalogDb(): void {
+  catalogCmd(["init-db"])
+}
+
+export function spawnEpisodeSuggest(episodeId: string): void {
+  spawnJob(
+    ["-m", "product_placement.jobs", "episode-suggest", "--episode-id", episodeId],
+    {}
+  )
+}
+
+export function spawnPlacementSwap(
+  placementId: string,
+  opts?: { testMode?: boolean; confirm?: boolean }
+): void {
+  const testMode = opts?.testMode !== false
+  const args = [
+    "-m",
+    "product_placement.jobs",
+    "placement-swap",
+    "--placement-id",
+    placementId,
+  ]
+  if (testMode) args.push("--test-mode")
+  else args.push("--no-test-mode")
+  if (opts?.confirm !== false) args.push("--confirm")
+  spawnJob(args, {})
+}
+
+export function localObjectPath(key: string): string {
+  const cleaned = key.replace(/\.\./g, "_").replace(/^\/+/, "")
+  return path.join(dataRoot(), "objects", cleaned)
+}
+
+export function localObjectExists(key: string): boolean {
+  try {
+    return fs.existsSync(localObjectPath(key))
+  } catch {
+    return false
+  }
+}
+
+export function usingS3(): boolean {
+  return Boolean(
+    (process.env.AWS_S3_BUCKET_NAME || "").trim() &&
+      (process.env.AWS_ACCESS_KEY_ID || "").trim() &&
+      (process.env.AWS_SECRET_ACCESS_KEY || "").trim()
+  )
+}

@@ -1,4 +1,4 @@
-"""Async job runner for suggest + crop-stitch Seedance swap (disk status JSON)."""
+"""Async job runner for suggest + frame-based Seedance i2v swap (disk status JSON)."""
 
 from __future__ import annotations
 
@@ -161,29 +161,25 @@ def run_swap_job(
     resolution: str = "720p",
     brand_id: str | None = None,
 ) -> dict[str, Any]:
+    """Frame-based swap: extract frame → edit → Seedance i2v (or mock)."""
     from product_placement.crop_stitch import (
         MAX_INPUT_S,
-        Region,
-        TARGET_HOLD_S,
-        build_crop_hold,
-        estimate_seedance_cost_usd,
+        estimate_frame_swap_cost_usd,
         extract_moment_clip,
-        mock_edit_crop,
-        probe_video,
-        stitch_edit_into_moment,
     )
-    from product_placement.higgsfield import default_swap_prompt
+    from product_placement.frame_swap import clamp_i2v_duration, run_frame_swap
 
-    brand = None
-    prompt = None
     if brand_id:
-        from product_placement.brand import brand_swap_prompt, load_brand, primary_asset_path
+        # Optional file-backed override; catalog placements resolve assets via object store.
+        try:
+            from product_placement.brand import load_brand, primary_asset_path
 
-        brand = load_brand(brand_id)
-        asset = primary_asset_path(brand)
-        if asset and asset.is_file():
-            product_path = asset
-        prompt = brand_swap_prompt(brand, target)
+            brand = load_brand(brand_id)
+            asset = primary_asset_path(brand)
+            if asset and asset.is_file():
+                product_path = asset
+        except Exception:
+            pass
 
     if not confirm:
         raise ValueError("confirm=true is required before a paid (or mock) swap")
@@ -196,8 +192,8 @@ def run_swap_job(
     if duration > MAX_INPUT_S + 1e-3:
         raise ValueError(f"input window {duration:.3f}s exceeds max {MAX_INPUT_S}s")
 
-    hold_s = min(TARGET_HOLD_S, max(duration, 2.0))
-    estimated = estimate_seedance_cost_usd(hold_s)
+    i2v_duration = clamp_i2v_duration(duration)
+    estimated = estimate_frame_swap_cost_usd(float(i2v_duration))
     out = job_dir(job_id)
     work = out / "work"
     work.mkdir(parents=True, exist_ok=True)
@@ -206,7 +202,7 @@ def run_swap_job(
         job_id,
         type="swap",
         status="running",
-        progress="Extracting moment + building crop",
+        progress="Extracting frame + editing for Seedance i2v",
         created_at=utc_now(),
         estimated_cost_usd=estimated,
         mock=mock_higgsfield_enabled(),
@@ -216,49 +212,35 @@ def run_swap_job(
 
     t0 = time.perf_counter()
     try:
-        reg = Region.from_dict(region)
+        # Keep original moment for side-by-side UI.
         moment_clip = extract_moment_clip(
             video_path, start_s, end_s, work / "moment.mp4"
         )
-        crop_hold = build_crop_hold(
-            moment_clip, reg, work / "crop_hold.mp4", hold_s=hold_s
-        )
-        _, _, crop_dur, _ = probe_video(crop_hold)
-        if crop_dur > MAX_INPUT_S + 1e-3:
-            raise ValueError(f"crop hold {crop_dur:.3f}s exceeds max {MAX_INPUT_S}s")
-
-        edited = work / "seedance_edit.mp4"
-        backend = "mock" if mock_higgsfield_enabled() else "seedance"
-        if mock_higgsfield_enabled():
-            write_status(job_id, progress="Mock Seedance edit (MOCK_HIGGSFIELD=1)")
-            mock_edit_crop(crop_hold, product_path, edited)
-            request_id = "mock"
-            video_url = ""
-        else:
-            write_status(job_id, progress="Uploading + running Seedance 2.5")
-            from product_placement.backends import seedance_edit
-
-            result = seedance_edit(
-                crop_hold,
-                Path(product_path),
-                prompt or default_swap_prompt(target),
-                out_path=edited,
-                work_dir=work / "hf",
-                resolution="720p",
-                backend="seedance",
-            )
-            request_id = result.request_id
-            video_url = result.video_url
-            backend = result.backend or "seedance"
-
-        write_status(job_id, progress="Feather-stitching edit into moment")
-        stitched = stitch_edit_into_moment(
-            moment_clip, edited, reg, out / "result.mp4"
-        )
-        # Also keep original moment for side-by-side UI.
         original = out / "original.mp4"
         if not original.exists():
             original.write_bytes(moment_clip.read_bytes())
+
+        result_path = out / "result.mp4"
+        write_status(
+            job_id,
+            progress=(
+                "Mock frame swap (MOCK_HIGGSFIELD=1)"
+                if mock_higgsfield_enabled()
+                else "Frame edit + Seedance 2.5 image-to-video"
+            ),
+        )
+        meta = run_frame_swap(
+            video_path=video_path,
+            product_path=product_path,
+            start_s=start_s,
+            end_s=end_s,
+            region=region,
+            target=target,
+            out_path=result_path,
+            work_dir=work / "frame",
+            confirm=True,
+            test_mode=mock_higgsfield_enabled(),
+        )
 
         elapsed = time.perf_counter() - t0
         payload = {
@@ -266,18 +248,23 @@ def run_swap_job(
             "result_url": f"/api/jobs/{job_id}/file/result.mp4",
             "download_url": f"/api/jobs/{job_id}/file/result.mp4?download=1",
             "original_path": str(original),
-            "result_path": str(stitched),
-            "backend": backend,
-            "request_id": request_id,
-            "video_url": video_url,
+            "result_path": str(result_path),
+            "backend": meta.get("backend") or (
+                "mock" if mock_higgsfield_enabled() else "seedance-i2v"
+            ),
+            "request_id": meta.get("request_id") or "",
+            "edit_request_id": meta.get("edit_request_id") or "",
+            "video_url": meta.get("video_url") or "",
             "estimated_cost_usd": estimated,
-            "billed_duration_s": round(crop_dur, 3),
+            "billed_duration_s": meta.get("billed_duration_s") or float(i2v_duration),
             "elapsed_s": round(elapsed, 3),
             "mock": mock_higgsfield_enabled(),
             "target": target,
             "start_s": start_s,
             "end_s": end_s,
             "region": region,
+            "frame_path": meta.get("frame_path"),
+            "edited_frame_path": meta.get("edited_frame_path"),
         }
         (out / "swap.json").write_text(json.dumps(payload, indent=2) + "\n")
         return write_status(
@@ -296,6 +283,287 @@ def run_swap_job(
             traceback=traceback.format_exc()[-4000:],
         )
         raise
+
+
+def _claim_episode_suggest(conn, episode_id: str) -> bool:
+    """Atomically claim an episode for suggest. Returns False if already claimed/ready."""
+    result = conn.execute(
+        "UPDATE episodes SET suggest_status = ? WHERE id = ? AND ("
+        "suggest_status IS NULL OR suggest_status IN ('', 'queued', 'failed')"
+        ")",
+        ("running", episode_id),
+    )
+    conn.commit()
+    rowcount = getattr(result, "rowcount", None)
+    if rowcount is None:
+        # Some drivers need a cursor; fall back to re-read.
+        from product_placement.catalog import get_episode
+
+        ep = get_episode(conn, id=episode_id)
+        return bool(ep and ep.get("suggest_status") == "running")
+    return int(rowcount) > 0
+
+
+def reset_stale_suggest_running(conn) -> int:
+    """Crash recovery: flip abandoned 'running' rows back to queued (boot/seed)."""
+    result = conn.execute(
+        "UPDATE episodes SET suggest_status = ? WHERE suggest_status = ?",
+        ("queued", "running"),
+    )
+    conn.commit()
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
+    """Download episode video from object store, run suggest(), persist moments + frames."""
+    import tempfile
+
+    from product_placement.catalog import get_episode, insert_moment
+    from product_placement.db import get_connection, init_schema, utc_now
+    from product_placement.object_store import get_object_store
+    from product_placement.suggest import clamp_n, suggest
+
+    conn = get_connection()
+    init_schema(conn)
+    try:
+        ep = get_episode(conn, id=episode_id)
+        if not ep:
+            raise ValueError(f"episode not found: {episode_id}")
+        video_key = ep.get("video_key")
+        if not video_key:
+            raise ValueError(f"episode {episode_id} has no video_key")
+
+        if not _claim_episode_suggest(conn, episode_id):
+            # Another worker owns it, or it's already ready.
+            fresh = get_episode(conn, id=episode_id) or ep
+            return {
+                "episode_id": episode_id,
+                "suggest_status": fresh.get("suggest_status"),
+                "skipped": True,
+                "reason": "already claimed or ready",
+                "updated_at": utc_now(),
+            }
+
+        store = get_object_store()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "episode.mp4"
+            store.get_file(video_key, video_path)
+            out_dir = tmp_path / "suggest"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            moments = suggest(
+                video_path=video_path,
+                n=clamp_n(n),
+                out_dir=out_dir,
+                brand=None,
+                use_clip=True,
+            )
+
+            # Replace prior moments for this episode (only after claim).
+            conn.execute("DELETE FROM moments WHERE episode_id = ?", (episode_id,))
+            conn.commit()
+
+            stored: list[dict[str, Any]] = []
+            for i, m in enumerate(moments):
+                frame_key = f"moments/{episode_id}/moment_{i + 1:02d}.jpg"
+                if m.frame_path.is_file():
+                    store.put_file(m.frame_path, frame_key, content_type="image/jpeg")
+                row = insert_moment(
+                    conn,
+                    episode_id=episode_id,
+                    start_s=m.start_s,
+                    end_s=m.end_s,
+                    region=m.region.as_dict(),
+                    whats_there=m.whats_there,
+                    score=m.score,
+                    reason=m.reason,
+                    frame_key=frame_key if m.frame_path.is_file() else None,
+                    frame_w=m.frame_w,
+                    frame_h=m.frame_h,
+                )
+                stored.append(row)
+
+        conn.execute(
+            "UPDATE episodes SET suggest_status = ? WHERE id = ?",
+            ("ready", episode_id),
+        )
+        conn.commit()
+        return {
+            "episode_id": episode_id,
+            "suggest_status": "ready",
+            "moments": stored,
+            "updated_at": utc_now(),
+        }
+    except Exception:
+        try:
+            conn.execute(
+                "UPDATE episodes SET suggest_status = ? WHERE id = ?",
+                ("failed", episode_id),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def run_placement_swap_job(
+    placement_id: str,
+    *,
+    confirm: bool,
+    test_mode: bool = True,
+) -> dict[str, Any]:
+    """Render an approved placement: queued → rendering → ready/failed; store clip."""
+    import os
+    import tempfile
+
+    from product_placement.catalog import get_brand, get_episode, get_placement, update_placement
+    from product_placement.db import fetchone_dict, get_connection, init_schema
+    from product_placement.object_store import get_object_store
+
+    # Paid path requires explicit confirm; test_mode defaults True (mock).
+    if not test_mode and not confirm:
+        raise ValueError("paid placement swap requires confirm=True (and test_mode=False)")
+    if not confirm:
+        raise ValueError("confirm=true is required before a placement swap")
+
+    conn = get_connection()
+    init_schema(conn)
+    try:
+        placement = get_placement(conn, id=placement_id)
+        if not placement:
+            raise ValueError(f"placement not found: {placement_id}")
+
+        # Idempotent: a duplicate spawn must not re-bill / overwrite a ready clip.
+        cur_status = str(placement.get("status") or "")
+        if cur_status == "ready" and placement.get("clip_key"):
+            return placement
+        if cur_status == "rendering":
+            return placement
+
+        moment = fetchone_dict(
+            conn, "SELECT * FROM moments WHERE id = ?", (placement["moment_id"],)
+        )
+        if not moment:
+            raise ValueError(f"moment not found: {placement['moment_id']}")
+
+        ep = get_episode(conn, id=placement["episode_id"] or moment["episode_id"])
+        if not ep or not ep.get("video_key"):
+            raise ValueError("episode video missing")
+
+        brand_row = get_brand(conn, id=placement["brand_id"])
+        if not brand_row:
+            raise ValueError(f"brand not found: {placement['brand_id']}")
+
+        update_placement(
+            conn,
+            placement_id,
+            status="rendering",
+            test_mode=1 if test_mode else 0,
+            error=None,
+        )
+
+        store = get_object_store()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "episode.mp4"
+            store.get_file(ep["video_key"], video_path)
+
+            # Resolve product asset: prefer DB object_key, else file brand dir.
+            product_path = tmp_path / "product.png"
+            assets = brand_row.get("assets") or []
+            if assets and assets[0].get("object_key"):
+                store.get_file(assets[0]["object_key"], product_path)
+            else:
+                from product_placement.brand import load_brand, primary_asset_path
+
+                brand = load_brand(brand_row["id"])
+                asset = primary_asset_path(brand)
+                if not asset or not asset.is_file():
+                    raise ValueError(f"brand {brand_row['id']} has no product asset")
+                product_path.write_bytes(asset.read_bytes())
+
+            region = json.loads(moment["region_json"] or "{}")
+            target = moment.get("whats_there") or "object"
+
+            from product_placement.crop_stitch import MAX_INPUT_S
+            from product_placement.frame_swap import run_frame_swap
+
+            start_s = float(moment["start_s"])
+            end_s = float(moment["end_s"])
+            duration = end_s - start_s
+            if duration <= 0:
+                raise ValueError("moment end_s must be greater than start_s")
+            if duration > MAX_INPUT_S + 1e-3:
+                raise ValueError(
+                    f"input window {duration:.3f}s exceeds max {MAX_INPUT_S}s"
+                )
+
+            work = tmp_path / "frame_swap"
+            result_path = work / "clip.mp4"
+            # Force mock when test_mode; paid path leaves MOCK_HIGGSFIELD to env.
+            prev_mock = os.environ.get("MOCK_HIGGSFIELD")
+            if test_mode:
+                os.environ["MOCK_HIGGSFIELD"] = "1"
+            try:
+                meta = run_frame_swap(
+                    video_path=video_path,
+                    product_path=product_path,
+                    start_s=start_s,
+                    end_s=end_s,
+                    region=region,
+                    target=target,
+                    out_path=result_path,
+                    work_dir=work / "work",
+                    confirm=True,
+                    test_mode=test_mode,
+                )
+            finally:
+                if test_mode:
+                    if prev_mock is None:
+                        os.environ.pop("MOCK_HIGGSFIELD", None)
+                    else:
+                        os.environ["MOCK_HIGGSFIELD"] = prev_mock
+
+            if not result_path.is_file():
+                raise RuntimeError("frame swap completed but result clip missing")
+
+            clip_key = f"placements/{placement_id}/clip.mp4"
+            store.put_file(result_path, clip_key, content_type="video/mp4")
+            # Persist the edited still for debugging / brand review.
+            edited = Path(meta.get("edited_frame_path") or "")
+            if edited.is_file():
+                store.put_file(
+                    edited,
+                    f"placements/{placement_id}/edited_frame.jpg",
+                    content_type="image/jpeg",
+                )
+            backend = meta.get("backend") or ("mock" if test_mode else "seedance-i2v")
+            updated = update_placement(
+                conn,
+                placement_id,
+                status="ready",
+                clip_key=clip_key,
+                backend=backend,
+                test_mode=1 if test_mode else 0,
+                error=None,
+            )
+            return updated
+    except Exception as exc:
+        try:
+            update_placement(
+                conn,
+                placement_id,
+                status="failed",
+                error=str(exc)[:2000],
+            )
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -319,6 +587,27 @@ def build_parser() -> argparse.ArgumentParser:
     sw.add_argument("--confirm", action="store_true")
     sw.add_argument("--resolution", default="720p")
     sw.add_argument("--brand-id", default=None)
+
+    es = sub.add_parser("episode-suggest")
+    es.add_argument("--episode-id", required=True)
+    es.add_argument("-n", type=int, default=5)
+
+    ps = sub.add_parser("placement-swap")
+    ps.add_argument("--placement-id", required=True)
+    ps.add_argument("--confirm", action="store_true")
+    ps.add_argument(
+        "--test-mode",
+        dest="test_mode",
+        action="store_true",
+        default=True,
+        help="Force mock backend (default)",
+    )
+    ps.add_argument(
+        "--no-test-mode",
+        dest="test_mode",
+        action="store_false",
+        help="Allow paid Seedance path (requires --confirm)",
+    )
     return p
 
 
@@ -348,6 +637,18 @@ def main(argv: list[str] | None = None) -> None:
                 resolution=args.resolution,
                 brand_id=args.brand_id,
             )
+            return
+        if args.command == "episode-suggest":
+            result = run_episode_suggest_job(args.episode_id, n=args.n)
+            print(json.dumps(result, indent=2, default=str))
+            return
+        if args.command == "placement-swap":
+            result = run_placement_swap_job(
+                args.placement_id,
+                confirm=bool(args.confirm),
+                test_mode=bool(args.test_mode),
+            )
+            print(json.dumps(result, indent=2, default=str))
             return
         raise SystemExit(f"unknown command {args.command}")
     except Exception as exc:

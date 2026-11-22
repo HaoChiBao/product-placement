@@ -15,6 +15,8 @@ import httpx
 
 API_BASE = "https://api.higgsfield.ai"
 SEEDANCE_EDIT = f"{API_BASE}/bytedance/seedance-2.5/video-edit"
+SEEDANCE_I2V = f"{API_BASE}/bytedance/seedance-2.5/image-to-video"
+QWEN_IMAGE_EDIT = f"{API_BASE}/alibaba/qwen-image-3/edit"
 GENJUTSU_SWAP = f"{API_BASE}/higgsfield/genjutsu/object-swap/v1.0"
 UPLOAD_URL = f"{API_BASE}/files/generate-upload-url"
 
@@ -29,6 +31,15 @@ class HiggsfieldError(RuntimeError):
 class JobResult:
     request_id: str
     video_url: str
+    backend: str
+    raw: dict[str, Any]
+    image_url: str = ""
+
+
+@dataclass(frozen=True)
+class ImageJobResult:
+    request_id: str
+    image_url: str
     backend: str
     raw: dict[str, Any]
 
@@ -60,7 +71,7 @@ def build_seedance_body(
     image_url: str,
     resolution: str = "720p",
 ) -> dict[str, Any]:
-    # Verified live shape: no duration; include bitrate_mode + generate_audio.
+    # Legacy video-edit shape (kept for CLI backends).
     return {
         "prompt": prompt,
         "video_url": video_url,
@@ -69,6 +80,60 @@ def build_seedance_body(
         "bitrate_mode": "high",
         "generate_audio": True,
     }
+
+
+def build_seedance_i2v_body(
+    *,
+    prompt: str,
+    image_url: str,
+    duration: int = 5,
+    resolution: str = "720p",
+) -> dict[str, Any]:
+    """POST /bytedance/seedance-2.5/image-to-video payload."""
+    allowed = {"480p", "720p", "1080p"}
+    if resolution not in allowed:
+        raise ValueError(f"resolution must be one of {sorted(allowed)}")
+    dur = int(duration)
+    if dur < 4 or dur > 30:
+        raise ValueError("duration must be an integer in [4, 30]")
+    return {
+        "prompt": prompt,
+        "image_url": image_url,
+        "duration": dur,
+        "resolution": resolution,
+        "bitrate_mode": "high",
+        "generate_audio": True,
+    }
+
+
+def build_qwen_edit_body(
+    *,
+    prompt: str,
+    image_urls: list[str],
+    resolution: str = "1k",
+    aspect_ratio: str = "16:9",
+) -> dict[str, Any]:
+    """POST /alibaba/qwen-image-3/edit payload (frame + product references)."""
+    if not image_urls:
+        raise ValueError("image_urls required")
+    if resolution not in {"1k", "2k"}:
+        raise ValueError("qwen resolution must be 1k or 2k")
+    return {
+        "prompt": prompt,
+        "image_urls": list(image_urls),
+        "resolution": resolution,
+        "aspect_ratio": aspect_ratio,
+        "prompt_extend": False,
+        "enable_thinking": False,
+    }
+
+
+def default_i2v_prompt(target: str) -> str:
+    return (
+        f"Continue the shot naturally from this still. Keep the camera motion, "
+        f"lighting, and the {target}/product placement locked in place. "
+        "Subtle realistic motion only — no scene change."
+    )
 
 
 def build_genjutsu_body(
@@ -246,6 +311,64 @@ class HiggsfieldClient:
         handle = self.submit(SEEDANCE_EDIT, body)
         done = self.poll(handle["status_url"], timeout_s=poll_timeout_s)
         return self._as_result(done, backend="seedance")
+
+    def run_seedance_i2v(
+        self,
+        *,
+        prompt: str,
+        image_url: str,
+        duration: int = 5,
+        resolution: str = "720p",
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
+    ) -> JobResult:
+        body = build_seedance_i2v_body(
+            prompt=prompt,
+            image_url=image_url,
+            duration=duration,
+            resolution=resolution,
+        )
+        handle = self.submit(SEEDANCE_I2V, body)
+        done = self.poll(handle["status_url"], timeout_s=poll_timeout_s)
+        return self._as_result(done, backend="seedance-i2v")
+
+    def run_qwen_edit(
+        self,
+        *,
+        prompt: str,
+        image_urls: list[str],
+        resolution: str = "1k",
+        aspect_ratio: str = "16:9",
+        poll_timeout_s: float = DEFAULT_POLL_TIMEOUT_S,
+    ) -> ImageJobResult:
+        body = build_qwen_edit_body(
+            prompt=prompt,
+            image_urls=image_urls,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+        )
+        handle = self.submit(QWEN_IMAGE_EDIT, body)
+        done = self.poll(handle["status_url"], timeout_s=poll_timeout_s)
+        status = done.get("status")
+        if status != "completed":
+            raise HiggsfieldError(f"qwen-edit ended with status={status!r}: {done}")
+        images = done.get("images") or []
+        url = None
+        if images and isinstance(images[0], dict):
+            url = images[0].get("url")
+        elif images and isinstance(images[0], str):
+            url = images[0]
+        if not url:
+            # Some responses nest under image.url
+            image = done.get("image") or {}
+            url = image.get("url") if isinstance(image, dict) else None
+        if not url:
+            raise HiggsfieldError(f"qwen-edit completed without image url: {done}")
+        return ImageJobResult(
+            request_id=str(done.get("request_id") or ""),
+            image_url=url,
+            backend="qwen-image-3-edit",
+            raw=done,
+        )
 
     def run_genjutsu(
         self,
