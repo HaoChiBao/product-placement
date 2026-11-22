@@ -109,13 +109,9 @@ function Research() {
         setProfile(job.profile)
         return
       }
-      if (attempt === 0 && same && saved?.mockProfile && !saved.jobId) {
-        setLive(null)
-        setSources(mockSources.length)
-        setStepIdx(mockSteps.length)
-        setProfile(saved.mockProfile)
-        return
-      }
+      // A board saved from a simulated run is only reused while the server still has
+      // no TinyFish key; once it does, reopening the step runs the real research.
+      const savedMock = attempt === 0 && same && !saved?.jobId ? saved?.mockProfile : undefined
 
       // New run (new input or "Try again"): earlier image and brand choices no longer apply.
       setFlow({ input })
@@ -156,6 +152,12 @@ function Research() {
         showFound(started.jobId, job)
         setJobId(started.jobId)
         setFlow({ input, jobId: started.jobId })
+      } else if (savedMock) {
+        // Still no TinyFish key: show the board from the earlier simulated run.
+        setLive(null)
+        setSources(mockSources.length)
+        p = savedMock
+        setFlow({ input, mockProfile: p })
       } else {
         // No TinyFish key on the server (or ?mock=1): simulate the research steps.
         setLive(null)
