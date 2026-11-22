@@ -60,6 +60,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="runs/suggest",
         help="Writes moments.json, contact_sheet.jpg, and frames/",
     )
+    sug_p.add_argument(
+        "--brand",
+        default=None,
+        help="Brand id or path to brand.json / brand directory",
+    )
+    sug_p.add_argument(
+        "--no-clip",
+        action="store_true",
+        help="Skip CLIP soft scores (YOLOX + aspect only)",
+    )
     return parser
 
 
@@ -90,11 +100,18 @@ def main(argv: list[str] | None = None) -> None:
         # Lazy: suggest pulls optional OpenCV / numpy.
         from product_placement.suggest import clamp_n, suggest
 
+        brand = None
+        if args.brand:
+            from product_placement.brand import resolve_brand
+
+            brand = resolve_brand(args.brand)
         t0 = time.perf_counter()
         moments = suggest(
             video_path=args.video,
             n=clamp_n(args.n),
             out_dir=args.out_dir,
+            brand=brand,
+            use_clip=not args.no_clip,
         )
         elapsed = time.perf_counter() - t0
         print(json.dumps([m.to_dict() for m in moments], indent=2))

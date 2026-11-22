@@ -55,3 +55,10 @@ def ensure_yolox(cache_dir: Path | None = None) -> Path:
     if local.is_file() and local.stat().st_size > 1000:
         return local
     return _download(YOLOX_URL, root / YOLOX_NAME)
+
+
+def ensure_clip(cache_dir: Path | None = None) -> tuple[Path, Path, Path]:
+    """Download quantized CLIP vision/text ONNX + tokenizer (optional brand scorer)."""
+    from product_placement.clip_onnx import ensure_clip_models
+
+    return ensure_clip_models(cache_dir or default_cache_dir())

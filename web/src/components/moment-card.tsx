@@ -97,9 +97,14 @@ export function MomentCard({
               style={box}
             />
           </div>
-          <div className="absolute left-3 top-3 flex gap-2">
+          <div className="absolute left-3 top-3 flex flex-wrap gap-2">
             <HaloBadge variant="secondary">{`#${index + 1}`}</HaloBadge>
             <HaloBadge variant="default">{moment.score.toFixed(2)}</HaloBadge>
+            {moment.brand_fit && (
+              <HaloBadge variant="secondary">
+                fit {(moment.brand_fit.total ?? 0).toFixed(2)}
+              </HaloBadge>
+            )}
           </div>
         </div>
       </button>
@@ -116,6 +121,11 @@ export function MomentCard({
 
       <TextureCardContent className="space-y-3 px-4 pb-4">
         <p className="text-sm leading-relaxed text-foreground/80">{moment.reason}</p>
+        {moment.brand_fit?.reason && (
+          <p className="rounded-xl bg-[var(--accent)]/50 px-3 py-2 text-xs leading-relaxed text-[var(--ink)]">
+            Brand fit: {moment.brand_fit.reason}
+          </p>
+        )}
 
         <video
           ref={videoRef}

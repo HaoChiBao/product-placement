@@ -456,10 +456,12 @@ def choose_placement(
     frame_h: int,
     *,
     allow_weak_fallback: bool = False,
+    preferred_labels: set[str] | None = None,
 ) -> tuple[BBox, str, float] | None:
     """Prefer a replaceable prop, else a face-free patch on a detected surface."""
     frame_area = frame_w * frame_h
     max_prop_area = 0.22 * frame_area
+    preferred_labels = preferred_labels or set()
 
     props = [
         d
@@ -471,7 +473,8 @@ def choose_placement(
     if props:
         props.sort(
             key=lambda d: d.score
-            * (1.0 + 0.15 * (d.label in {"wine glass", "bottle", "cup"})),
+            * (1.0 + 0.15 * (d.label in {"wine glass", "bottle", "cup"}))
+            * (1.0 + 0.55 * (d.label in preferred_labels)),
             reverse=True,
         )
         best = props[0]
@@ -507,7 +510,12 @@ def choose_placement(
         if d.label in SURFACES and region_avoids_faces(d.box, faces, max_iou=0.15)
     ]
     if surfaces:
-        surfaces.sort(key=lambda d: d.score * min(d.box.area, 0.3 * frame_area), reverse=True)
+        surfaces.sort(
+            key=lambda d: d.score
+            * min(d.box.area, 0.3 * frame_area)
+            * (1.0 + 0.6 * (d.label in preferred_labels)),
+            reverse=True,
+        )
         surf = surfaces[0]
         # Bounded patch on the lower surface — not the whole bed/table span.
         target_w = min(int(0.45 * frame_w), max(int(0.5 * surf.box.w), int(0.25 * frame_w)))

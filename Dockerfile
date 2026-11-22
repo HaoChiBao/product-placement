@@ -30,11 +30,10 @@ COPY src ./src
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir -e .
 
-# Bake ONNX weights into the image (not committed in git).
+# Bake ONNX weights into the image (not committed in git). CLIP is optional for brand scoring.
 ENV MODEL_CACHE_DIR=/app/models
-RUN mkdir -p /app/models \
-    && python -c "from pathlib import Path; from product_placement.models_store import ensure_yunet, ensure_yolox; \
-p=Path('/app/models'); ensure_yunet(p); ensure_yolox(p); print('models ok', list(p.iterdir()))"
+COPY docker/bake_models.py /tmp/bake_models.py
+RUN mkdir -p /app/models && python /tmp/bake_models.py && rm /tmp/bake_models.py
 
 # Next standalone output (+ static/public assets Next expects beside server.js)
 COPY --from=web-build /app/web/.next/standalone /app/web-standalone

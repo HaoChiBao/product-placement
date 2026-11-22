@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
+import { BrandsPanel } from "@/components/brands-panel"
 import { MomentCard } from "@/components/moment-card"
 import { HaloButton } from "@/components/ui/halo-button"
 import { HaloDropzone } from "@/components/ui/halo-dropzone"
@@ -10,6 +11,7 @@ import { HaloInput } from "@/components/ui/halo-input"
 import { HaloProgress } from "@/components/ui/halo-progress"
 import {
   estimateSwapCostUsd,
+  type Brand,
   type JobStatus,
   type SuggestRun,
 } from "@/lib/types"
@@ -67,6 +69,7 @@ export function SuggestApp() {
   const [swapping, setSwapping] = useState(false)
   const [swapProgress, setSwapProgress] = useState<string | null>(null)
   const [swapResult, setSwapResult] = useState<SwapResult | null>(null)
+  const [brand, setBrand] = useState<Brand | null>(null)
   const abortRef = useRef<AbortController | null>(null)
 
   const selectedMoment = run?.moments[selected] ?? null
@@ -83,6 +86,15 @@ export function SuggestApp() {
       setSwapResult(null)
     }
   }, [selectedMoment])
+
+  useEffect(() => {
+    if (brand?.assets?.[0]) {
+      setProductPath("")
+      setProductFile(null)
+    } else {
+      setProductPath((p) => p || "assets/samples/soda_can.png")
+    }
+  }, [brand])
 
   const onFiles = useCallback((files: File[]) => {
     setFile(files[0] ?? null)
@@ -107,6 +119,7 @@ export function SuggestApp() {
       const form = new FormData()
       const nn = opts?.n ?? n
       form.set("n", String(nn))
+      if (brand?.id) form.set("brandId", brand.id)
       const p = (opts?.path ?? path).trim()
       const f = opts?.file !== undefined ? opts.file : file
       if (p) form.set("path", p)
@@ -153,8 +166,8 @@ export function SuggestApp() {
       setError("Confirm the estimated Seedance cost before running a swap.")
       return
     }
-    if (!productFile && !productPath.trim()) {
-      setError("Upload a product image or pick the sample path.")
+    if (!brand && !productFile && !productPath.trim()) {
+      setError("Upload a product image, pick the sample path, or select a brand.")
       return
     }
 
@@ -171,8 +184,9 @@ export function SuggestApp() {
       form.set("momentIndex", String(selected))
       form.set("target", target || selectedMoment.whats_there)
       form.set("confirm", "true")
+      if (brand?.id) form.set("brandId", brand.id)
       if (productFile) form.set("product", productFile)
-      else form.set("productPath", productPath.trim())
+      else if (productPath.trim()) form.set("productPath", productPath.trim())
 
       const res = await fetch("/api/jobs/swap", { method: "POST", body: form })
       const data = await res.json()
@@ -224,12 +238,14 @@ export function SuggestApp() {
             Suggest · swap
           </h1>
           <p className="max-w-xl text-base leading-relaxed text-[var(--ink-soft)]">
-            Upload a cut, pick a face-free moment, drop a product, then run a
-            crop-and-stitch Seedance 2.5 swap. Jobs poll in the background — swaps
-            are capped at 5&nbsp;s / 720p and need an explicit cost confirm.
+            Onboard a brand brief that steers moment picks, then upload a cut,
+            swap with crop-and-stitch Seedance 2.5. Jobs poll in the background —
+            swaps are capped at 5&nbsp;s / 720p and need an explicit cost confirm.
           </p>
         </div>
       </header>
+
+      <BrandsPanel selectedId={brand?.id ?? null} onSelect={setBrand} />
 
       <section className="grid gap-6 lg:grid-cols-[1.1fr_0.9fr]">
         <HaloDropzone
@@ -318,6 +334,8 @@ export function SuggestApp() {
                 run {run.runId}
                 {run.elapsed_s != null ? ` · ${run.elapsed_s.toFixed(1)}s` : ""} ·{" "}
                 {run.duration_s?.toFixed?.(1) ?? "?"}s source
+                {run.brand_id ? ` · brand ${run.brand_id}` : ""}
+                {run.vetoed?.length ? ` · vetoed ${run.vetoed.length}` : ""}
               </p>
             </div>
           </div>
@@ -360,14 +378,27 @@ export function SuggestApp() {
             />
 
             <div className="flex flex-col gap-4">
-              <HaloField>
-                <HaloFieldLabel>Or sample product path</HaloFieldLabel>
-                <HaloInput
-                  value={productPath}
-                  onChange={(e) => setProductPath(e.target.value)}
-                  placeholder="assets/samples/soda_can.png"
-                />
-              </HaloField>
+              {brand?.assets?.[0] ? (
+                <div className="rounded-2xl border border-black/5 bg-white/80 p-4 text-sm">
+                  Using brand asset{" "}
+                  <span className="font-mono">{brand.assets[0]}</span> from{" "}
+                  <strong>{brand.name}</strong>
+                  <img
+                    src={`/api/brands/${brand.id}/assets/${encodeURIComponent(brand.assets[0])}`}
+                    alt={brand.name}
+                    className="mt-3 h-20 w-20 rounded-lg object-contain bg-neutral-100"
+                  />
+                </div>
+              ) : (
+                <HaloField>
+                  <HaloFieldLabel>Or sample product path</HaloFieldLabel>
+                  <HaloInput
+                    value={productPath}
+                    onChange={(e) => setProductPath(e.target.value)}
+                    placeholder="assets/samples/soda_can.png"
+                  />
+                </HaloField>
+              )}
               <HaloField>
                 <HaloFieldLabel>Target object</HaloFieldLabel>
                 <HaloInput
