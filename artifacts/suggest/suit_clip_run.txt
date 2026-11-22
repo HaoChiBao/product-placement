@@ -1,0 +1,46 @@
+{
+  "elapsed_s": 12.35,
+  "cost_usd": 0.0,
+  "result": "no moments",
+  "reason": "Uploaded suit_clip.mp4 is a ~10s portrait close-up (face + blank wall), not the restaurant/wine-glasses take described in the crop-and-stitch log. YOLOX finds person/tie only (no table/bottle/glass). Border-feature camera motion is high (actor-dominated / possible micro-move). Pipeline correctly returned no placement moments.",
+  "diagnostics": [
+    {
+      "window": [
+        0.0,
+        5.0
+      ],
+      "cam_px": 45.2,
+      "max_allowed": 8.0,
+      "faces": 1,
+      "dets": [
+        [
+          "person",
+          0.914
+        ],
+        [
+          "tie",
+          0.849
+        ]
+      ]
+    },
+    {
+      "window": [
+        5.01,
+        10.01
+      ],
+      "cam_px": 36.25,
+      "max_allowed": 8.0,
+      "faces": 1,
+      "dets": [
+        [
+          "person",
+          0.912
+        ],
+        [
+          "tie",
+          0.827
+        ]
+      ]
+    }
+  ]
+}

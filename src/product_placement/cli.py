@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import time
 
 from product_placement.backends import MODELS
@@ -12,7 +13,7 @@ from product_placement.pipeline import swap
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="product_placement",
-        description="Swap a target object for a product image via a video-edit model.",
+        description="Suggest product-placement moments, then swap via a video-edit model.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -42,31 +43,65 @@ def build_parser() -> argparse.ArgumentParser:
     swap_p.add_argument("--prompt", default=None, help="Override the default swap prompt")
     swap_p.add_argument("--work-dir", default="runs/swap")
     swap_p.add_argument("--poll-timeout", type=float, default=1200.0)
+
+    sug_p = sub.add_parser(
+        "suggest",
+        help="Find 3–5 face-free ~5s moments for product placement in a full video",
+    )
+    sug_p.add_argument("--video", required=True, help="Full-length input video")
+    sug_p.add_argument(
+        "-n",
+        type=int,
+        default=5,
+        help="How many moments to return (clamped to 3–5)",
+    )
+    sug_p.add_argument(
+        "--out-dir",
+        default="runs/suggest",
+        help="Writes moments.json, contact_sheet.jpg, and frames/",
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.command != "swap":
-        parser.error(f"Unknown command: {args.command}")
 
-    t0 = time.perf_counter()
-    result = swap(
-        clip=args.clip,
-        target=args.target,
-        product_image=args.product,
-        out=args.out,
-        model=args.model,
-        backend=args.backend,
-        resolution=args.resolution,
-        prompt=args.prompt,
-        work_dir=args.work_dir,
-        poll_timeout_s=args.poll_timeout,
-    )
-    elapsed = time.perf_counter() - t0
-    label = result.backend if result.model == "seedance" else result.model
-    print(f"Wrote {result.out_path} via {label} in {elapsed:.1f}s")
+    if args.command == "swap":
+        t0 = time.perf_counter()
+        result = swap(
+            clip=args.clip,
+            target=args.target,
+            product_image=args.product,
+            out=args.out,
+            model=args.model,
+            backend=args.backend,
+            resolution=args.resolution,
+            prompt=args.prompt,
+            work_dir=args.work_dir,
+            poll_timeout_s=args.poll_timeout,
+        )
+        elapsed = time.perf_counter() - t0
+        label = result.backend if result.model == "seedance" else result.model
+        print(f"Wrote {result.out_path} via {label} in {elapsed:.1f}s")
+        return
+
+    if args.command == "suggest":
+        # Lazy: suggest pulls optional OpenCV / numpy.
+        from product_placement.suggest import clamp_n, suggest
+
+        t0 = time.perf_counter()
+        moments = suggest(
+            video_path=args.video,
+            n=clamp_n(args.n),
+            out_dir=args.out_dir,
+        )
+        elapsed = time.perf_counter() - t0
+        print(json.dumps([m.to_dict() for m in moments], indent=2))
+        print(f"Wrote {args.out_dir}/moments.json and contact_sheet.jpg in {elapsed:.1f}s")
+        return
+
+    parser.error(f"Unknown command: {args.command}")
 
 
 if __name__ == "__main__":

@@ -2,16 +2,17 @@
 
 ## Goal
 
-`swap(clip, target, product_image) -> new_clip`: replace a named object in a short video with a product image, keeping motion, hands, and scene otherwise intact.
+`suggest(video) -> moments`, then `swap(clip, target, product_image) -> new_clip`: find face-free placement windows in a full cut, then replace a named object/region with a product image while keeping motion and scene intact.
 
 Longer term: per-viewer targeted placements inside shows (different brands for Viewer A vs Viewer B on the same shot).
 
-## Pipeline (6 steps)
+## Pipeline
 
-1. **Find target** — Grounding DINO from a text prompt, or a click.
-2. **Track** — SAM 2 mask through the clip.
-3. **Crop** — padded, stabilized region around the tracked object.
-4. **Generate** — replace inside the crop using crop + mask + product as reference.
+0. **Suggest** — shot cuts → stable ~5 s windows → YuNet faces + YOLOX props/surfaces → ranked, spread-out moments with a face-free bbox (feeds crop-and-stitch).
+1. **Find target** — text / click / suggested region.
+2. **Track** — SAM 2 (overlay path) or skip when the generative backend edits the whole crop.
+3. **Crop** — padded face-free region around the placement.
+4. **Generate** — replace inside the crop (Seedance / Wan / VACE).
 5. **Composite** — feather the edit back onto the source; match color where possible.
 6. **Evaluate** — side-by-side review plus a flicker / outside-mask drift metric.
 
@@ -23,10 +24,10 @@ Detect → track → paste PNG. Shipped as the overlay path on PR #1; generative
 **M2 — real generation (in progress)**  
 - Self-hosted Wan 2.1 VACE 14B on Modal: masked inpainting swaps, but looks unnatural at 480p; raw unmasked runs don't actually swap the object.
 - Wan 2.7 via Alibaba DashScope `wan2.7-videoedit`: pending account access.
-- Seedance 2.5 via Higgsfield: testing a face-free crop-and-stitch approach.
+- Seedance 2.5 via Higgsfield: face-free crop-and-stitch works better for moderation; `suggest` finds those moments.
 
 **M3 — evaluation + viewer**  
-Offline scores, then a Next.js viewer with a Viewer A / Viewer B brand toggle.
+Offline scores, then a Next.js viewer with a Viewer A / Viewer B brand toggle. The Cult UI app (`web/`) runs suggest → pick → product → async crop-and-stitch Seedance swap (poll jobs; cost confirm; Docker/Railway single service).
 
 ## How to run
 

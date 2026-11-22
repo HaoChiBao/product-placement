@@ -1,0 +1,90 @@
+{
+  "video": "tears_of_steel_720p.mov (Blender, CC-BY)",
+  "source_url": "https://download.blender.org/demo/movies/ToS/tears_of_steel_720p.mov",
+  "elapsed_s": 84.13,
+  "cost_usd": 0.0,
+  "n": 5,
+  "moments": [
+    {
+      "start_s": 130.0,
+      "end_s": 135.0,
+      "frame": "artifacts/suggest/tears_of_steel/frames/moment_01.jpg",
+      "region": {
+        "x": 693,
+        "y": 435,
+        "w": 320,
+        "h": 96
+      },
+      "whats_there": "empty bed",
+      "score": 0.4255,
+      "reason": "Stable 5s window; empty bed (det 0.33, cam 54.8px, faces 2)",
+      "frame_h": 534,
+      "frame_w": 1280
+    },
+    {
+      "start_s": 290.0,
+      "end_s": 295.0,
+      "frame": "artifacts/suggest/tears_of_steel/frames/moment_02.jpg",
+      "region": {
+        "x": 940,
+        "y": 340,
+        "w": 173,
+        "h": 189
+      },
+      "whats_there": "cup",
+      "score": 0.5804,
+      "reason": "Stable 5s window; cup (det 0.87, cam 86.0px, faces 6)",
+      "frame_h": 534,
+      "frame_w": 1280
+    },
+    {
+      "start_s": 564.5,
+      "end_s": 569.5,
+      "frame": "artifacts/suggest/tears_of_steel/frames/moment_03.jpg",
+      "region": {
+        "x": 376,
+        "y": 337,
+        "w": 142,
+        "h": 155
+      },
+      "whats_there": "cup",
+      "score": 0.7604,
+      "reason": "Stable 5s window; cup (det 0.73, cam 12.3px, faces 6)",
+      "frame_h": 534,
+      "frame_w": 1280
+    },
+    {
+      "start_s": 641.0,
+      "end_s": 646.0,
+      "frame": "artifacts/suggest/tears_of_steel/frames/moment_04.jpg",
+      "region": {
+        "x": 934,
+        "y": 0,
+        "w": 338,
+        "h": 194
+      },
+      "whats_there": "clock",
+      "score": 0.5743,
+      "reason": "Stable 5s window; clock (det 0.74, cam 78.1px, faces 1)",
+      "frame_h": 534,
+      "frame_w": 1280
+    },
+    {
+      "start_s": 709.5,
+      "end_s": 714.5,
+      "frame": "artifacts/suggest/tears_of_steel/frames/moment_05.jpg",
+      "region": {
+        "x": 2,
+        "y": 194,
+        "w": 442,
+        "h": 298
+      },
+      "whats_there": "suitcase",
+      "score": 0.4545,
+      "reason": "Stable 5s window; suitcase (det 0.58, cam 90.1px, faces 0)",
+      "frame_h": 534,
+      "frame_w": 1280
+    }
+  ],
+  "contact_sheet": "artifacts/suggest/tears_of_steel/contact_sheet.jpg"
+}

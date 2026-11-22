@@ -1,0 +1,42 @@
+{
+  "video": "coke_clip_1738.mp4 (Suits wine-glasses, not committed)",
+  "elapsed_s": 7.31,
+  "cost_usd": 0.0,
+  "n": 2,
+  "moments": [
+    {
+      "start_s": 0.0,
+      "end_s": 2.002,
+      "frame": "artifacts/suggest/coke_clip/frames/moment_01.jpg",
+      "frame_w": 1920,
+      "frame_h": 1080,
+      "region": {
+        "x": 868,
+        "y": 553,
+        "w": 304,
+        "h": 527
+      },
+      "whats_there": "wine glass",
+      "score": 0.8039,
+      "reason": "Short 2.0s shot (below 5s edit window); wine glass (det 0.87, cam 1.6px, faces 5)"
+    },
+    {
+      "start_s": 2.002,
+      "end_s": 4.004,
+      "frame": "artifacts/suggest/coke_clip/frames/moment_02.jpg",
+      "frame_w": 1920,
+      "frame_h": 1080,
+      "region": {
+        "x": 741,
+        "y": 488,
+        "w": 284,
+        "h": 509
+      },
+      "whats_there": "wine glass",
+      "score": 0.8336,
+      "reason": "Short 2.0s shot (below 5s edit window); wine glass (det 0.92, cam 0.3px, faces 5)"
+    }
+  ],
+  "contact_sheet": "artifacts/suggest/coke_clip/contact_sheet.jpg",
+  "note": "Table reverse-angles are ~2s each; YOLOX finds wine glasses. suggest keeps short shots (>=2s) and samples camera motion inside the window so boundary frames do not jump into the next shot."
+}

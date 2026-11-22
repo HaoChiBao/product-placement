@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --ink: #152028;
+    --ink-soft: #4a5963;
+    --place: #2f9e7a;
+    --background: #e9eef1;
+    --foreground: #152028;
+    --card: #f7fafb;
+    --card-foreground: #152028;
+    --popover: #f7fafb;
+    --popover-foreground: #152028;
+    --primary: #1a3038;
+    --primary-foreground: #eef5f3;
+    --secondary: #d9e4e7;
+    --secondary-foreground: #1a3038;
+    --muted: #dde5e9;
+    --muted-foreground: #5a6870;
+    --accent: #cfe8df;
+    --accent-foreground: #1a3038;
+    --destructive: #b42318;
+    --border: #c5d0d6;
+    --input: #c5d0d6;
+    --ring: #2f9e7a;
+    --radius: 0.9rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    background-image:
+      radial-gradient(ellipse at 15% 0%, rgba(47, 158, 122, 0.12), transparent 42%),
+      radial-gradient(ellipse at 90% 10%, rgba(40, 80, 110, 0.1), transparent 40%),
+      linear-gradient(180deg, #eef3f5 0%, #e5ecef 50%, #dfe8e6 100%);
+    background-attachment: fixed;
+  }
+}
