@@ -58,7 +58,7 @@ function clampByteRange(
   if (size <= 0) return null
   const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader)
   if (!m) return null
-  let start = m[1] ? parseInt(m[1], 10) : 0
+  const start = m[1] ? parseInt(m[1], 10) : 0
   let end = m[2] ? parseInt(m[2], 10) : size - 1
   if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0) return null
   if (start >= size) return null
