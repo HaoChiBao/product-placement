@@ -53,6 +53,16 @@ def test_pick_spread_returns_n_and_spaces_them():
         assert b - a >= 10.0
 
 
+def test_pick_spread_fills_same_shot_on_the_second_pass():
+    cands = [
+        _cand(0, 1.0, 0),
+        _cand(30, 0.9, 0),
+        _cand(60, 0.8, 0),
+    ]
+    picked = pick_spread(cands, 3, min_gap_s=10.0)
+    assert [p.start_s for p in picked] == [0.0, 30.0, 60.0]
+
+
 def test_pick_spread_prefers_different_shots():
     # High score pair in same shot vs lower scores in other shots.
     cands = [

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -97,7 +98,7 @@ def pick_spread(candidates: list[_Cand], n: int, *, min_gap_s: float) -> list[_C
     for c in ranked:
         if len(picked) >= n:
             break
-        if c in picked or not _far(c):
+        if any(c is p for p in picked) or not _far(c):
             continue
         picked.append(c)
 
@@ -329,11 +330,24 @@ def suggest(
     use_clip: bool = True,
     diagnostics: dict[str, Any] | None = None,
 ) -> list[Moment]:
-    """Find 3–5 spread-out ~5s placement moments in a full-length video.
+    """Find 3–5 spread-out placement moments in a full-length video.
 
-    When ``brand`` is set, prefer/avoid rules re-rank candidates and can veto windows.
-    Without a brand, behavior matches the original scorer.
+    When ``OPENROUTER_API_KEY`` is set, Jev on OpenRouter screens contact sheets and
+    boxes a full frame. Otherwise YuNet + YOLOX score stable windows. A brand
+    re-ranks and can veto on the classical path, and is written into the Jev prompt.
     """
+    if (os.environ.get("OPENROUTER_API_KEY") or "").strip():
+        from product_placement.jev_moments import suggest_with_jev
+
+        return suggest_with_jev(
+            video_path,
+            n,
+            out_dir=out_dir,
+            window_s=window_s,
+            brand=brand,
+            diagnostics=diagnostics,
+        )
+
     video_path = Path(video_path)
     out_dir = Path(out_dir)
     frames_dir = out_dir / "frames"

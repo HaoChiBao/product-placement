@@ -81,12 +81,16 @@ def run_suggest_job(
     out = job_dir(job_id)
     frames = out / "frames"
     frames.mkdir(parents=True, exist_ok=True)
+    scanning = (
+        "Screening contact sheets"
+        if (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+        else "Scanning shots · faces · props"
+    )
     write_status(
         job_id,
         type="suggest",
         status="running",
-        progress="Scanning shots · faces · props"
-        + (f" · brand {brand.name}" if brand else ""),
+        progress=scanning + (f" · brand {brand.name}" if brand else ""),
         created_at=utc_now(),
         brand_id=brand_id,
     )
