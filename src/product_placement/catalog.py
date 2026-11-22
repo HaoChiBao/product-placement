@@ -895,13 +895,15 @@ def _stream_store_to_file(store: ObjectStore, key: str, dest: Path) -> Path:
     return dest
 
 
-def _copy_object(store: ObjectStore, src_key: str, dest_key: str) -> bool:
+def _copy_object(
+    store: ObjectStore, src_key: str, dest_key: str, *, overwrite: bool = False
+) -> bool:
     """Copy one object to another key via a temp file. Returns True if copied."""
     if src_key == dest_key:
         return False
     if not store.exists(src_key):
         return False
-    if store.exists(dest_key):
+    if store.exists(dest_key) and not overwrite:
         return False
     with tempfile.TemporaryDirectory() as tmp:
         local = Path(tmp) / "obj"
@@ -978,33 +980,46 @@ def migrate_catalog_object_keys(conn: Connection | None = None) -> dict[str, Any
         # Moment frames: moments/<episode_id>/ → catalog/.../moments/
         moments = fetchall_dicts(
             conn,
-            "SELECT * FROM moments WHERE episode_id = ? ORDER BY start_s",
+            "SELECT * FROM moments WHERE episode_id = ? ORDER BY start_s, id",
             (ep["id"],),
         )
+        live_keys = {str(mom.get("frame_key") or "") for mom in moments}
         for i, mom in enumerate(moments, start=1):
-            old_key = mom.get("frame_key")
+            old_key = str(mom.get("frame_key") or "")
             new_key = moment_frame_key(slug, season, episode_n, i)
-            candidates = []
-            if old_key:
-                candidates.append(str(old_key))
-            candidates.append(legacy_moment_frame_key(str(ep["id"]), i))
-            src = next((c for c in candidates if store.exists(c)), None)
-            if not src:
+            if old_key and store.exists(old_key):
+                src = old_key
+            else:
+                legacy = legacy_moment_frame_key(str(ep["id"]), i)
+                src = legacy if store.exists(legacy) else ""
+            if not src or src == new_key:
+                if src == new_key:
+                    skipped += 1
                 continue
-            if src == new_key:
+            # A leftover moment_NN.jpg is an old still, not this row's image.
+            # Keep the row's object unless that index name still belongs to
+            # another moment, in which case renaming would swap the pictures.
+            dest_is_live = new_key in live_keys and new_key != old_key
+            if dest_is_live:
                 skipped += 1
                 continue
-            if _copy_object(store, src, new_key) or store.exists(new_key):
-                if src != new_key and store.exists(src):
-                    try:
-                        store.delete(src)
-                    except Exception:
-                        pass
-                conn.execute(
-                    "UPDATE moments SET frame_key = ? WHERE id = ?",
-                    (new_key, mom["id"]),
-                )
-                moved.append(f"moment:{mom['id']}")
+            copied = _copy_object(
+                store, src, new_key, overwrite=bool(old_key) and src == old_key
+            )
+            if not copied and not store.exists(new_key):
+                skipped += 1
+                continue
+            other_lives = live_keys - {old_key}
+            if src != new_key and src not in other_lives and store.exists(src):
+                try:
+                    store.delete(src)
+                except Exception:
+                    pass
+            conn.execute(
+                "UPDATE moments SET frame_key = ? WHERE id = ?",
+                (new_key, mom["id"]),
+            )
+            moved.append(f"moment:{mom['id']}")
 
     placements = fetchall_dicts(conn, "SELECT * FROM placements ORDER BY created_at")
     for pl in placements:
@@ -1508,6 +1523,7 @@ def insert_moment(
     frame_w: int = 0,
     frame_h: int = 0,
     moment_id: str | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     mid = moment_id or new_id()
     region_json = region if isinstance(region, str) else json.dumps(region)
@@ -1528,8 +1544,179 @@ def insert_moment(
             int(frame_h or 0),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return fetchone_dict(conn, "SELECT * FROM moments WHERE id = ?", (mid,))  # type: ignore[return-value]
+
+
+_JOB_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{3}$")
+_EPISODE_ID = re.compile(r"^[0-9a-f]{12}$")
+_FRAME_NAME = re.compile(r"^moment_\d{2}\.jpg$")
+
+
+def _as_region(raw: Any) -> dict[str, int]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            raw = {}
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "x": int(raw.get("x") or 0),
+        "y": int(raw.get("y") or 0),
+        "w": int(raw.get("w") or 0),
+        "h": int(raw.get("h") or 0),
+    }
+
+
+def _resolve_frame(moment: dict[str, Any], frames_dir: Path | None) -> Path | None:
+    """Stills come only from frames_dir, by moment_XX.jpg basename."""
+    if frames_dir is None:
+        return None
+    raw = str(moment.get("frame") or moment.get("_frame_path") or "")
+    name = Path(raw).name
+    if not _FRAME_NAME.match(name):
+        return None
+    root = frames_dir.resolve()
+    path = (root / name).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return None
+    return path
+
+
+def replace_episode_moments(
+    conn: Connection,
+    *,
+    episode_id: str,
+    moments: list[dict[str, Any]],
+    frames_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Replace an episode's moments and store each still in the object store."""
+    if not _EPISODE_ID.match(episode_id):
+        raise ValueError("invalid episode id")
+    ep = get_episode(conn, id=episode_id)
+    if not ep:
+        raise ValueError(f"episode not found: {episode_id}")
+    title = get_title(conn, id=str(ep["title_id"]))
+    slug = str((title or {}).get("slug") or "title")
+    season = int(ep.get("season") or 1)
+    episode_n = int(ep.get("episode_number") or 1)
+    from product_placement.catalog_keys import episode_prefix, moment_frame_key
+    from product_placement.object_store import get_object_store
+
+    store = get_object_store()
+    prefix = episode_prefix(slug, season, episode_n)
+    prepared: list[tuple[str, dict[str, Any], str | None, bytes | None]] = []
+    for moment in moments:
+        frame_path = _resolve_frame(moment, frames_dir)
+        moment_id = new_id()
+        staging_key = None
+        blob = None
+        if frame_path is not None:
+            staging_key = f"{prefix}/moments/_incoming/{moment_id}.jpg"
+            blob = frame_path.read_bytes()
+        prepared.append((moment_id, moment, staging_key, blob))
+    for _moment_id, _moment, staging_key, blob in prepared:
+        if staging_key is None or blob is None:
+            continue
+        store.put_bytes(blob, staging_key, content_type="image/jpeg")
+    try:
+        conn.execute("DELETE FROM moments WHERE episode_id = ?", (episode_id,))
+        stored: list[dict[str, Any]] = []
+        for moment_id, moment, staging_key, _blob in prepared:
+            row = insert_moment(
+                conn,
+                episode_id=episode_id,
+                start_s=float(moment.get("start_s") or 0),
+                end_s=float(moment.get("end_s") or 0),
+                region=_as_region(moment.get("region")),
+                whats_there=str(moment.get("whats_there") or ""),
+                score=float(moment.get("score") or 0),
+                reason=str(moment.get("reason") or ""),
+                frame_key=staging_key,
+                frame_w=int(moment.get("frame_w") or 0),
+                frame_h=int(moment.get("frame_h") or 0),
+                moment_id=moment_id,
+                commit=False,
+            )
+            stored.append(row)
+        conn.execute(
+            "UPDATE episodes SET suggest_status = ? WHERE id = ?",
+            ("ready", episode_id),
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        for _moment_id, _moment, staging_key, _blob in prepared:
+            if staging_key and store.exists(staging_key):
+                try:
+                    store.delete(staging_key)
+                except Exception:
+                    pass
+        raise
+    blobs = {moment_id: blob for moment_id, _moment, _key, blob in prepared}
+    rows = fetchall_dicts(
+        conn,
+        "SELECT * FROM moments WHERE episode_id = ? ORDER BY start_s, id",
+        (episode_id,),
+    )
+    finals: set[str] = set()
+    for index, row in enumerate(rows, start=1):
+        blob = blobs.get(str(row["id"]))
+        if blob is None:
+            continue
+        final_key = moment_frame_key(slug, season, episode_n, index)
+        store.put_bytes(blob, final_key, content_type="image/jpeg")
+        conn.execute(
+            "UPDATE moments SET frame_key = ? WHERE id = ?",
+            (final_key, row["id"]),
+        )
+        row["frame_key"] = final_key
+        finals.add(final_key)
+    conn.commit()
+    for key in store.list_keys(f"{prefix}/moments/"):
+        if key in finals:
+            continue
+        try:
+            store.delete(key)
+        except Exception:
+            pass
+    return {
+        "episode_id": episode_id,
+        "suggest_status": "ready",
+        "count": len(rows),
+        "moments": rows,
+    }
+
+
+def moments_from_suggest_job(job_id: str) -> tuple[list[dict[str, Any]], Path]:
+    if not _JOB_ID.match(job_id):
+        raise ValueError("invalid job id")
+    from product_placement.jobs import data_root
+
+    job = data_root() / "jobs" / job_id
+    meta = job / "moments.json"
+    if not meta.is_file():
+        raise FileNotFoundError(f"suggest job not found: {job_id}")
+    payload = json.loads(meta.read_text())
+    if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
+        moments = payload["result"].get("moments") or []
+    elif isinstance(payload, dict):
+        moments = payload.get("moments") or []
+    else:
+        raise ValueError("moments.json")
+    if not isinstance(moments, list):
+        raise ValueError("moments.json")
+    return [m for m in moments if isinstance(m, dict)], job / "frames"
+
+
+def adopt_suggest_job(conn: Connection, *, episode_id: str, job_id: str) -> dict[str, Any]:
+    """Copy a finished suggest job's spots and stills onto a catalog episode."""
+    moments, frames = moments_from_suggest_job(job_id)
+    return replace_episode_moments(
+        conn, episode_id=episode_id, moments=moments, frames_dir=frames
+    )
 
 
 def list_moments(
@@ -2510,6 +2697,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add("backfill-posters")
     add("migrate-catalog-keys")
+    adopt = add("adopt-suggest-job")
+    adopt.add_argument("--episode-id", required=True)
+    adopt.add_argument("--job-id", required=True)
+    replace = add("replace-moments")
+    replace.add_argument("--episode-id", required=True)
+    replace.add_argument("--moments-json", required=True)
+    replace.add_argument("--frames-dir", default=None)
 
     return p
 
@@ -2734,6 +2928,31 @@ def main(argv: list[str] | None = None) -> None:
 
         if args.command == "migrate-catalog-keys":
             _print_json(migrate_catalog_object_keys(conn))
+            return
+
+        if args.command == "adopt-suggest-job":
+            _print_json(
+                adopt_suggest_job(conn, episode_id=args.episode_id, job_id=args.job_id)
+            )
+            return
+
+        if args.command == "replace-moments":
+            payload = json.loads(Path(args.moments_json).read_text())
+            if isinstance(payload, dict) and isinstance(payload.get("result"), dict):
+                moments = payload["result"].get("moments") or []
+            elif isinstance(payload, dict):
+                moments = payload.get("moments") or []
+            else:
+                moments = payload
+            frames = Path(args.frames_dir) if args.frames_dir else None
+            _print_json(
+                replace_episode_moments(
+                    conn,
+                    episode_id=args.episode_id,
+                    moments=[m for m in moments if isinstance(m, dict)],
+                    frames_dir=frames,
+                )
+            )
             return
 
         raise SystemExit(f"unknown command {args.command}")
