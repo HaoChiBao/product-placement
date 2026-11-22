@@ -393,6 +393,56 @@ def test_collect_candidates_reads_linked_product_pages():
     assert [c.url for c in cands] == ["https://brand.test/img/zero-can-front.png"]
 
 
+def test_agent_thumbnail_is_upgraded_to_the_original():
+    # Olipop: the agent copied the `_400x400` thumbnail (246×397 once decoded).
+    thumb = "https://cdn.shopify.com/s/files/1/0034/files/Vintage-Cola_main_400x400.webp"
+    original = "https://cdn.shopify.com/s/files/1/0034/files/Vintage-Cola_main.webp"
+
+    def fetch(urls, **kw):
+        return {"results": [{"final_url": "https://brand.test", "image_links": [original], "links": []}]}
+
+    cands = collect_candidates(fetch, site="https://brand.test", product="Vintage Cola", agent_url=thumb, product_url=None)
+    assert [(c.source, c.url, c.fallback) for c in cands] == [("agent", original, thumb)]
+
+
+def test_agent_2x_takes_the_3x_on_the_page():
+    def fetch(urls, **kw):
+        return {
+            "results": [
+                {
+                    "final_url": "https://www.pepsi.ca/",
+                    "image_links": ["/static/media/pepsi@2x.15edcaad.png", "/static/media/pepsi@3x.9b1c0d2e.png"],
+                    "links": [],
+                }
+            ]
+        }
+
+    agent = "https://www.pepsi.ca/static/media/pepsi@2x.15edcaad.png"
+    cands = collect_candidates(fetch, site="https://www.pepsi.ca", product="Pepsi", agent_url=agent, product_url=None)
+    assert [(c.source, c.url, c.fallback) for c in cands] == [
+        ("agent", "https://www.pepsi.ca/static/media/pepsi@3x.9b1c0d2e.png", agent)
+    ]
+
+
+def test_agent_falls_back_to_its_own_url_when_the_original_is_missing(tmp_path: Path):
+    thumb = "https://cdn.shopify.com/files/can_400x400.png"
+
+    def fetch(urls, **kw):
+        return {"results": [{"final_url": "https://brand.test", "image_links": [], "links": []}]}
+
+    http = client(
+        {thumb: httpx.Response(200, headers={"content-type": "image/png"}, content=png_bytes(packshot()))}
+    )
+
+    class NoClip:
+        available = False
+
+    entries = source_product_images(
+        tmp_path, fetch=fetch, site="https://brand.test", product="Can", agent_url=thumb, http=http, clip=NoClip()
+    )
+    assert [(e["source"], e["url"]) for e in entries] == [("agent", thumb)]
+
+
 # ------------------------------------------------------------------ retailer fallback
 
 

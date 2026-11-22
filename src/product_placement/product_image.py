@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urljoin, urlparse
@@ -96,6 +96,7 @@ class Candidate:
     referer: str = ""  # page the image came from; defaults to the brand site
     host: str = ""  # retailer host, for "Found on walmart.com"
     multipack: bool = False  # named/listed as a pack; ranked below single units
+    fallback: str = ""  # URL as given, tried when the full-size `url` won't download
 
 
 @dataclass
@@ -454,8 +455,13 @@ def collect_candidates(
     page images come from `image_links`, not from parsing tags.
     """
     found: list[Candidate] = []
+    agent: Candidate | None = None
     if agent_url and _usable_url(agent_url):
-        found.append(Candidate(agent_url, "agent", AGENT_PRIOR))
+        # The agent often copies a thumbnail (Shopify `_400x400`, `@2x`); ask for
+        # the original, keeping its URL as the fallback.
+        big, agent_key, agent_scale = largest_variant(agent_url)
+        agent = Candidate(big, "agent", AGENT_PRIOR, fallback=agent_url if big != agent_url else "")
+        found.append(agent)
 
     has_product_url = (product_url or "").startswith("http")
     first = [u for u in dict.fromkeys([product_url if has_product_url else "", site]) if u]
@@ -495,6 +501,12 @@ def collect_candidates(
                     found += parse_shopify_json(str(js_pages[0].get("text") or ""), product)
     except Exception:
         pass
+    if agent is not None:
+        # A bigger `@3x` of the agent's `@2x` on the page: take it, with agent credit.
+        for raw in image_urls:
+            url, key, scale = largest_variant(raw)
+            if key == agent_key and scale > agent_scale:
+                agent.url, agent.fallback, agent_scale = url, agent_url, scale
     found += rank_image_links(image_urls, site, product)
 
     seen: set[str] = set()
@@ -611,6 +623,9 @@ def _download_clean(
     kept: list[CleanImage] = []
     for c in cands:
         data = download_image(client, c.url, c.referer or site)
+        if data is None and c.fallback:
+            c = replace(c, url=c.fallback)
+            data = download_image(client, c.url, c.referer or site)
         if data is None:
             continue
         # Same file on two hosts (shop.com/cdn/shop/… and cdn.shopify.com/…).
