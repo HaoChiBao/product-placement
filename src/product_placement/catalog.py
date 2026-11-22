@@ -2166,6 +2166,44 @@ def import_finished_placements(conn: Connection, payload: Any) -> dict[str, Any]
     return {"placements": written}
 
 
+def _placement_ids(payload: Any) -> list[str]:
+    if not isinstance(payload, dict):
+        raise ValueError("expected an object with ids")
+    raw = payload.get("ids")
+    if not isinstance(raw, list):
+        raise ValueError("ids required")
+    ids: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError("placement id required")
+        pid = item.strip()
+        if pid in seen:
+            continue
+        seen.add(pid)
+        ids.append(pid)
+    return ids
+
+
+def delete_placements(conn: Connection, payload: Any) -> dict[str, Any]:
+    """Delete placement rows by id. Clips in the object store are left in place."""
+    ids = _placement_ids(payload)
+    deleted: list[str] = []
+    not_found: list[str] = []
+    try:
+        for pid in ids:
+            if get_placement(conn, id=pid) is None:
+                not_found.append(pid)
+                continue
+            conn.execute("DELETE FROM placements WHERE id = ?", (pid,))
+            deleted.append(pid)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"deleted": deleted, "not_found": not_found}
+
+
 def _parse_import_moment(item: Any) -> dict[str, Any]:
     if not isinstance(item, dict):
         raise ValueError("moment must be an object")
@@ -2948,6 +2986,9 @@ def build_parser() -> argparse.ArgumentParser:
     imp_mo = add("import-moments")
     imp_mo.add_argument("--payload", required=True, help="JSON file path, or - for stdin")
 
+    del_pl = add("delete-placements")
+    del_pl.add_argument("--payload", required=True, help="JSON file path, or - for stdin")
+
     wp = add("get-watch-payload")
     wp.add_argument("--title-slug", required=True)
     wp.add_argument("--season", type=int, required=True)
@@ -3181,6 +3222,13 @@ def main(argv: list[str] | None = None) -> None:
         if args.command == "import-moments":
             try:
                 _print_json(replace_generic_moments(conn, _read_json_input(args.payload)))
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            return
+
+        if args.command == "delete-placements":
+            try:
+                _print_json(delete_placements(conn, _read_json_input(args.payload)))
             except ValueError as exc:
                 raise SystemExit(str(exc)) from exc
             return

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +14,7 @@ from product_placement.catalog import (
     create_brand,
     create_episode,
     create_title,
+    delete_placements,
     get_watch_payload,
     import_finished_placements,
     insert_moment,
@@ -458,6 +463,105 @@ def test_moments_replace_rolls_back(catalog_env, monkeypatch):
         conn, "SELECT whats_there FROM moments WHERE episode_id = ?", (ep["id"],)
     )
     assert [row["whats_there"] for row in left] == ["plate"]
+
+
+def test_delete_placements_are_gone_from_watch(catalog_env):
+    conn = catalog_env
+    _title, ep = _episode(conn)
+    store = get_object_store()
+    store.put_bytes(b"swap-a", "swaps/home-alone/ha-1.mp4", content_type="video/mp4")
+    store.put_bytes(b"swap-b", "swaps/home-alone/ha-4.mp4", content_type="video/mp4")
+    imported = import_finished_placements(
+        conn,
+        [
+            _placement(episode_id=ep["id"]),
+            _placement(
+                episode_id=ep["id"],
+                start_s=62.668,
+                end_s=64.668,
+                brand="Sherwin-Williams",
+                object="paint can on banister",
+                video_s3_key="swaps/home-alone/ha-4.mp4",
+                cost_usd=0.30,
+            ),
+        ],
+    )
+    drop = imported["placements"][0]
+    keep = imported["placements"][1]
+
+    result = delete_placements(conn, {"ids": [drop["id"], "missing-placement"]})
+    assert result == {"deleted": [drop["id"]], "not_found": ["missing-placement"]}
+
+    payload = get_watch_payload(conn, title_slug="home-alone", season=1, episode=1)
+    assert [p["id"] for p in payload["placements"]] == [keep["id"]]
+    assert fetchall_dicts(conn, "SELECT id FROM placements WHERE id = ?", (drop["id"],)) == []
+    assert fetchall_dicts(conn, "SELECT id FROM placements WHERE id = ?", (keep["id"],))
+    assert fetchall_dicts(conn, "SELECT id FROM moments WHERE id = ?", (drop["moment_id"],))
+    assert store.exists("swaps/home-alone/ha-1.mp4")
+    assert store.read_range("swaps/home-alone/ha-1.mp4", 0, 5) == b"swap-a"
+    assert store.exists("swaps/home-alone/ha-4.mp4")
+
+
+def test_delete_placements_reports_unknown_ids(catalog_env):
+    conn = catalog_env
+    _title, ep = _episode(conn)
+    imported = import_finished_placements(conn, [_placement(episode_id=ep["id"])])
+    kept = imported["placements"][0]["id"]
+
+    result = delete_placements(conn, {"ids": ["no-such-a", "no-such-b"]})
+    assert result == {"deleted": [], "not_found": ["no-such-a", "no-such-b"]}
+    payload = get_watch_payload(conn, title_slug="home-alone", season=1, episode=1)
+    assert [p["id"] for p in payload["placements"]] == [kept]
+
+
+def test_delete_placements_cli_matches_the_route(catalog_env):
+    conn = catalog_env
+    _title, ep = _episode(conn)
+    imported = import_finished_placements(conn, [_placement(episode_id=ep["id"])])
+    pid = imported["placements"][0]["id"]
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "product_placement.catalog",
+            "delete-placements",
+            "--payload",
+            "-",
+        ],
+        input=json.dumps({"ids": [pid, "missing-placement"]}),
+        text=True,
+        capture_output=True,
+        check=False,
+        env=os.environ.copy(),
+    )
+    assert proc.returncode == 0, proc.stderr
+    body = json.loads(proc.stdout)
+    assert body["deleted"] == [pid]
+    assert body["not_found"] == ["missing-placement"]
+    payload = get_watch_payload(conn, title_slug="home-alone", season=1, episode=1)
+    assert payload["placements"] == []
+    moment_id = imported["placements"][0]["moment_id"]
+    assert fetchall_dicts(conn, "SELECT id FROM moments WHERE id = ?", (moment_id,))
+
+
+def test_delete_route_missing_or_bad_token_is_401():
+    web = Path(__file__).resolve().parents[1] / "web"
+    proc = subprocess.run(
+        [
+            "node",
+            "--import",
+            "./test/register-hooks.mjs",
+            "--test",
+            "./test/admin-delete-route.test.mjs",
+        ],
+        cwd=web,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=os.environ.copy(),
+    )
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "delete route rejects a missing or bad admin token" in proc.stdout
 
 
 def test_bad_moment_does_not_delete(catalog_env):
