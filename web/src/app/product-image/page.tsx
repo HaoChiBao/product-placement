@@ -10,7 +10,8 @@ import { Button, ButtonLink } from "@/components/ui/button"
 import { Panel } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/empty-state"
 import { PageShell } from "@/components/ui/page-shell"
-import { createBrand, session } from "@/lib/catalog-client"
+import { createBrand, mediaUrl, session } from "@/lib/catalog-client"
+import { getFlow, researchDone, sameImage, sameInput, setFlow, type Flow, type FlowImage } from "@/lib/flow"
 import { takePendingAsset } from "@/lib/pending-asset"
 import {
   briefFor,
@@ -36,6 +37,20 @@ const SOURCE_LABEL: Record<ResearchImage["source"], string> = {
 
 type Choice = { kind: "candidate"; name: string } | { kind: "own" } | null
 
+const toFlowImage = (c: Choice): FlowImage => (c ? c : { kind: "none" })
+
+/** URL of the asset saved with a brand (for showing an earlier upload again). */
+async function savedAssetUrl(brandId: string): Promise<string | null> {
+  try {
+    const res = await fetch("/api/catalog/brands", { cache: "no-store" })
+    const body = (await res.json()) as { brands?: { id: string; assets?: { object_key?: string }[] }[] }
+    const brand = (body.brands || []).find((b) => b.id === brandId)
+    return mediaUrl(brand?.assets?.[0]?.object_key)
+  } catch {
+    return null
+  }
+}
+
 function ProductImage() {
   const params = useSearchParams()
   const router = useRouter()
@@ -54,6 +69,9 @@ function ProductImage() {
   const fileRef = useRef<HTMLInputElement>(null)
   const [own, setOwn] = useState<File | null>(null)
   const [ownUrl, setOwnUrl] = useState<string | null>(null)
+  // Reopened after saving: what was saved, so an unchanged choice isn't saved again.
+  const [saved, setSaved] = useState<{ flow: Flow; image?: FlowImage } | null>(null)
+  const [savedOwnUrl, setSavedOwnUrl] = useState<string | null>(null)
   const [profile, setProfile] = useState<BrandProfile | null>(null)
   const [images, setImages] = useState<ResearchImage[]>([])
   const [choice, setChoice] = useState<Choice>(null)
@@ -98,9 +116,34 @@ function ProductImage() {
       if (!p) {
         setError("We couldn’t load the research results. Run the research again.")
       }
+      const flow = getFlow()
+      const sameRun =
+        flow &&
+        researchDone(flow) &&
+        (jobId ? flow.jobId === jobId : !flow.jobId && sameInput(flow.input, input))
+      const prev = sameRun && flow.brandId ? flow.image : undefined
+      setSaved(sameRun ? { flow, image: prev } : null)
+      setSavedOwnUrl(prev?.kind === "own" ? prev.assetUrl || null : null)
       setProfile(p)
       setImages(imgs)
-      setChoice(upload ? { kind: "own" } : imgs[0] ? { kind: "candidate", name: imgs[0].name } : null)
+      // A new upload wins; else what was saved last time; else the best candidate.
+      const savedChoice: Choice | undefined =
+        prev?.kind === "candidate" && imgs.some((i) => i.name === prev.name)
+          ? { kind: "candidate", name: prev.name }
+          : prev?.kind === "own" && prev.assetUrl
+            ? { kind: "own" }
+            : prev?.kind === "none"
+              ? null
+              : undefined
+      setChoice(
+        upload
+          ? { kind: "own" }
+          : savedChoice !== undefined
+            ? savedChoice
+            : imgs[0]
+              ? { kind: "candidate", name: imgs[0].name }
+              : null
+      )
       setLoading(false)
     })()
     return () => {
@@ -114,13 +157,33 @@ function ProductImage() {
     setChoice({ kind: "own" })
   }
 
+  // Nothing changed since the brand was saved: just move on, don't save again.
+  const unchanged = Boolean(
+    saved?.flow.brandId && saved.image && !own && sameImage(toFlowImage(choice), saved.image)
+  )
+
   async function save(withImage: boolean) {
     if (!profile) return
+    if (withImage && unchanged) {
+      router.push("/videos")
+      return
+    }
     setSaving(true)
     setError("")
     try {
       let file: File | null = null
-      if (withImage && choice?.kind === "own") file = own
+      if (withImage && choice?.kind === "own") {
+        file = own
+        if (!file && savedOwnUrl) {
+          // The earlier upload isn't in memory any more; use the copy saved with the brand.
+          const res = await fetch(savedOwnUrl)
+          if (!res.ok) throw new Error(`Couldn’t load your saved image (${res.status})`)
+          const blob = await res.blob()
+          file = new File([blob], (saved?.image?.kind === "own" && saved.image.fileName) || "product.png", {
+            type: blob.type || "image/png",
+          })
+        }
+      }
       if (withImage && choice?.kind === "candidate") {
         const res = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/file/${choice.name}`)
         if (!res.ok) throw new Error(`Couldn’t load the product image (${res.status})`)
@@ -129,6 +192,13 @@ function ProductImage() {
       }
       const brand = await createBrand(profile.business, briefFor(profile, input.note), file)
       session.set({ brandId: brand.id, profile, hasAsset: Boolean(file) })
+      const picked = withImage ? choice : null
+      const image: FlowImage =
+        picked?.kind === "own"
+          ? { kind: "own", assetUrl: own ? await savedAssetUrl(brand.id) : savedOwnUrl, fileName: own?.name }
+          : toFlowImage(picked)
+      const base = saved?.flow || getFlow() || { input, jobId: jobId || undefined }
+      setFlow({ ...base, image, brandId: brand.id })
       router.push("/videos")
     } catch (e) {
       setError(`Couldn’t save the brand profile: ${e instanceof Error ? e.message : String(e)}`)
@@ -136,15 +206,17 @@ function ProductImage() {
     }
   }
 
-  const backHref = `/research?${new URLSearchParams(
-    Object.entries(input).filter(([, v]) => v) as [string, string][]
-  )}`
-  const nothing = !loading && !images.length && !own
+  const backQuery = new URLSearchParams(Object.entries(input).filter(([, v]) => v) as [string, string][])
+  if (jobId) backQuery.set("job", jobId)
+  const backHref = `/research?${backQuery}`
+  const ownSrc = ownUrl || savedOwnUrl
+  const nothing = !loading && !images.length && !ownSrc
+  const savedBefore = Boolean(saved?.flow.brandId)
 
   return (
     <PageShell narrow>
       <div className="mx-auto mt-[2vh] max-w-[760px]">
-        <div className="eyebrow">Product image</div>
+        <div className="eyebrow">{savedBefore ? "Product image · saved" : "Product image"}</div>
         <TextEffect
           as="h1"
           preset="fade-in-blur"
@@ -157,9 +229,13 @@ function ProductImage() {
             : `Is this your ${input.product || "product"}?`}
         </TextEffect>
         <p className="mt-2 text-muted-foreground">
-          {nothing
-            ? "We couldn’t find a clean product image on your site. Upload one, or continue without it."
-            : "This is the image we’ll place into creator videos. A transparent cutout blends in best."}
+          {savedBefore
+            ? "This is what you saved with your brand. Pick another image to change it."
+            : nothing && !jobId
+              ? "This was a simulated research run (no TinyFish key), so we didn’t look for images. Upload one, or continue without it."
+              : nothing
+                ? "We couldn’t find a clean product image on your site. Upload one, or continue without it."
+              : "This is the image we’ll place into creator videos. A transparent cutout blends in best."}
         </p>
 
         <Panel className="mt-[22px] flex flex-col gap-4 p-5">
@@ -171,13 +247,13 @@ function ProductImage() {
             </div>
           ) : (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-              {own && ownUrl ? (
+              {ownSrc ? (
                 <Tile
                   selected={choice?.kind === "own"}
                   onClick={() => setChoice({ kind: "own" })}
-                  src={ownUrl}
+                  src={ownSrc}
                   label="Your upload"
-                  detail={own.name}
+                  detail={own?.name || (saved?.image?.kind === "own" && saved.image.fileName) || "Saved with your brand"}
                 />
               ) : null}
               {images.map((img) => (
@@ -233,7 +309,15 @@ function ProductImage() {
               disabled={saving || loading || !profile}
               onClick={() => save(true)}
             >
-              {saving ? "Saving…" : choice ? "Use this image →" : "Continue without an image →"}
+              {saving
+                ? "Saving…"
+                : unchanged
+                  ? "Continue →"
+                  : savedBefore
+                    ? "Save changes →"
+                    : choice
+                      ? "Use this image →"
+                      : "Continue without an image →"}
             </Button>
           </div>
         </Panel>

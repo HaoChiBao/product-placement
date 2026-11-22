@@ -10,6 +10,7 @@ import { TopBar } from "@/components/top-bar"
 import { Button, ButtonLink } from "@/components/ui/button"
 import { RollingNumber } from "@/components/ui/rolling-number"
 import { PageShell } from "@/components/ui/page-shell"
+import { getFlow, researchDone, sameInput, setFlow } from "@/lib/flow"
 import { peekPendingAsset } from "@/lib/pending-asset"
 import {
   briefFor,
@@ -19,6 +20,7 @@ import {
   startResearch,
   type BrandProfile,
   type ResearchInput,
+  type ResearchJob,
   type ResearchSource,
   type ResearchStep,
 } from "@/lib/research"
@@ -37,6 +39,7 @@ function Research() {
     [params]
   )
   const forceMock = params.get("mock") === "1"
+  const urlJob = params.get("job") || ""
   const mockSteps = useMemo(() => research.steps(input), [input])
   const mockSources = useMemo(() => research.sources(input), [input])
   // Live TinyFish job state; null while simulating (or before the job reports).
@@ -50,6 +53,8 @@ function Research() {
   const [error, setError] = useState("")
   const [attempt, setAttempt] = useState(0)
   const [jobId, setJobId] = useState("")
+  // Best product image the job found, for the board when nothing was uploaded or saved.
+  const [foundImage, setFoundImage] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -59,8 +64,61 @@ function Research() {
       setSources(0)
       setProfile(null)
       setJobId("")
+      setFoundImage(null)
+      const showFound = (id: string, job: ResearchJob) => {
+        const best = job.images?.[0]
+        if (best) setFoundImage(`/api/jobs/${encodeURIComponent(id)}/file/${best.name}`)
+      }
       let p: BrandProfile
       let n = mockSteps.length
+
+      // Reopening a finished step: show the saved run, don't research again.
+      // A new run only starts for new input, or when "Try again" is clicked.
+      const saved = getFlow()
+      const same = sameInput(saved?.input, input)
+      const reviewJob = attempt === 0 ? urlJob || (same ? saved?.jobId || "" : "") : ""
+      if (reviewJob) {
+        const res = await fetch(`/api/jobs/${encodeURIComponent(reviewJob)}`, { cache: "no-store" }).catch(() => null)
+        if (cancelled) return
+        if (!res || !res.ok) {
+          setLive({ steps: [], sources: [] })
+          setError("These research results are no longer on the server. Run the research again.")
+          return
+        }
+        let job: ResearchJob | null
+        try {
+          // Returns at once for a finished job; follows along if it's still running.
+          job = await pollResearch(
+            reviewJob,
+            (j) => {
+              setLive({ steps: j.steps || [], sources: j.sources || [] })
+              setStepIdx(j.step || 0)
+              setSources((j.sources || []).length)
+            },
+            () => cancelled
+          )
+        } catch (e) {
+          if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+          return
+        }
+        if (!job || cancelled) return
+        if (!same || saved?.jobId !== reviewJob) setFlow({ input, jobId: reviewJob })
+        showFound(reviewJob, job)
+        setJobId(reviewJob)
+        setStepIdx(job.steps.length)
+        setProfile(job.profile)
+        return
+      }
+      if (attempt === 0 && same && saved?.mockProfile && !saved.jobId) {
+        setLive(null)
+        setSources(mockSources.length)
+        setStepIdx(mockSteps.length)
+        setProfile(saved.mockProfile)
+        return
+      }
+
+      // New run (new input or "Try again"): earlier image and brand choices no longer apply.
+      setFlow({ input })
       let started: { jobId: string } | { mock: true } = { mock: true }
       if (!forceMock) {
         setLive({ steps: [], sources: [] })
@@ -95,7 +153,9 @@ function Research() {
         forgetResearch(input, attempt)
         p = job.profile!
         n = job.steps.length
+        showFound(started.jobId, job)
         setJobId(started.jobId)
+        setFlow({ input, jobId: started.jobId })
       } else {
         // No TinyFish key on the server (or ?mock=1): simulate the research steps.
         setLive(null)
@@ -114,6 +174,7 @@ function Research() {
         if (cancelled) return
         setSources(mockSources.length)
         p = research.profile(input)
+        setFlow({ input, mockProfile: p })
       }
       // The brand is saved on the next step, once a product image is chosen.
       setStepIdx(n)
@@ -122,7 +183,7 @@ function Research() {
     return () => {
       cancelled = true
     }
-  }, [attempt, forceMock, mockSteps, mockSources, input])
+  }, [attempt, forceMock, mockSteps, mockSources, input, urlJob])
 
   const done = Boolean(profile)
   const imageStepHref = useMemo(() => {
@@ -134,16 +195,26 @@ function Research() {
   const pct = steps.length ? Math.min(100, (stepIdx / steps.length) * 100) : 0
   const current = steps[Math.min(stepIdx, steps.length - 1)]
 
-  // Preview of the uploaded product image for the board. Peek, don't take:
-  // the product-image step claims the file and saves it with the brand.
+  // Preview of the product image for the board. Peek, don't take: the
+  // product-image step claims the file and saves it with the brand. When
+  // reopening a saved run, show the image that was saved with the brand.
   const [productImage, setProductImage] = useState<string | null>(null)
   useEffect(() => {
     const file = peekPendingAsset()
-    if (!file) return
+    if (!file) {
+      const saved = getFlow()
+      const img = saved && sameInput(saved.input, input) && researchDone(saved) ? saved.image : undefined
+      if (img?.kind === "candidate" && saved?.jobId) {
+        setProductImage(`/api/jobs/${encodeURIComponent(saved.jobId)}/file/${img.name}`)
+      } else if (img?.kind === "own" && img.assetUrl) {
+        setProductImage(img.assetUrl)
+      }
+      return
+    }
     const url = URL.createObjectURL(file)
     setProductImage(url)
     return () => URL.revokeObjectURL(url)
-  }, [attempt])
+  }, [attempt, input])
 
   return (
     <PageShell narrow>
@@ -211,7 +282,7 @@ function Research() {
 
         <BrandMoodboard
           product={input.product}
-          productImage={productImage}
+          productImage={productImage || foundImage}
           sources={allSources.slice(0, sources)}
           profile={profile}
         />
