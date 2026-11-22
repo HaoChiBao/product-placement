@@ -155,9 +155,9 @@ VIDEO_SOURCE_CHOICES = ("test", "hosted", "all")
 
 
 def resolve_video_source(source: str | None = None) -> str:
-    raw = (source if source is not None else os.environ.get("VIDEO_SOURCE") or "all")
+    raw = (source if source is not None else os.environ.get("VIDEO_SOURCE") or "hosted")
     raw = str(raw).strip().lower()
-    return raw if raw in VIDEO_SOURCE_CHOICES else "all"
+    return raw if raw in VIDEO_SOURCE_CHOICES else "hosted"
 
 
 def list_titles(
@@ -2299,7 +2299,7 @@ def seed_blender_open_movies(
     poster_backfill = backfill_missing_posters(conn)
     seed_log("poster backfill updated=%s", poster_backfill.get("updated_count"))
 
-    titles_out = list_titles(conn)
+    titles_out = list_titles(conn, source="all")
     from product_placement.jobs import reset_stale_suggest_running
 
     reclaimed = reset_stale_suggest_running(conn)
@@ -2370,7 +2370,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--source",
         choices=VIDEO_SOURCE_CHOICES,
         default=None,
-        help="Filter by title source (default: VIDEO_SOURCE env or all)",
+        help="Filter by title source (default: VIDEO_SOURCE env or hosted)",
     )
 
     gt = add("get-title")

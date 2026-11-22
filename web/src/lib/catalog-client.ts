@@ -87,42 +87,22 @@ export function mediaUrl(key?: string | null): string | null {
   return `/api/media/${key.split("/").map(encodeURIComponent).join("/")}`
 }
 
-const VIDEO_SOURCE_KEY = "inset.videoSource"
-
 export function parseVideoSource(raw: string | null | undefined): VideoSource | null {
   const v = (raw || "").trim().toLowerCase()
   return v === "test" || v === "hosted" || v === "all" ? v : null
 }
 
-/** Query param → localStorage → null (API then uses VIDEO_SOURCE / all). */
-export function readVideoSource(): VideoSource | null {
+/** Page `?source=` only; omit so the API applies VIDEO_SOURCE / hosted. */
+export function videoSourceFromQuery(): VideoSource | null {
   if (typeof window === "undefined") return null
-  const fromQuery = parseVideoSource(new URLSearchParams(window.location.search).get("source"))
-  if (fromQuery) return fromQuery
-  try {
-    return parseVideoSource(window.localStorage.getItem(VIDEO_SOURCE_KEY))
-  } catch {
-    return null
-  }
-}
-
-export function writeVideoSource(source: VideoSource) {
-  try {
-    window.localStorage.setItem(VIDEO_SOURCE_KEY, source)
-  } catch {
-    /* storage blocked */
-  }
-  if (typeof window === "undefined") return
-  const url = new URL(window.location.href)
-  if (source === "all") url.searchParams.delete("source")
-  else url.searchParams.set("source", source)
-  window.history.replaceState({}, "", url.toString())
+  return parseVideoSource(new URLSearchParams(window.location.search).get("source"))
 }
 
 export async function listVideos(source?: VideoSource | null): Promise<Video[]> {
   // /api/catalog/titles defaults to watchable-only (ready episodes).
   const q = new URLSearchParams({ watchable: "1" })
-  if (source) q.set("source", source)
+  const src = source ?? videoSourceFromQuery()
+  if (src) q.set("source", src)
   const { titles } = await getJson<{ titles: Title[] }>(`/api/catalog/titles?${q}`)
   const lists = await Promise.all(
     (titles || []).map(async (title) => {

@@ -1,5 +1,5 @@
 import type { Episode, Title, VideoSource } from "@/lib/catalog-client"
-import { mediaUrl } from "@/lib/catalog-client"
+import { mediaUrl, videoSourceFromQuery } from "@/lib/catalog-client"
 
 export type WatchTitle = Title
 export type WatchEpisode = Episode
@@ -34,7 +34,8 @@ export async function loadWatchCatalog(source?: VideoSource | null): Promise<{
   episodes: Record<string, Episode[]>
 }> {
   const q = new URLSearchParams({ watchable: "1" })
-  if (source) q.set("source", source)
+  const src = source ?? videoSourceFromQuery()
+  if (src) q.set("source", src)
   const res = await fetch(`/api/catalog/titles?${q}`)
   const data = await res.json()
   if (!res.ok) throw new Error(data.error || "failed to load catalog")

@@ -3,10 +3,8 @@
 import Link from "next/link"
 import { useEffect, useMemo, useState } from "react"
 
-import { VideoSourceToggle } from "@/components/video-source-toggle"
 import { WatchChrome } from "@/components/watch-chrome"
-import type { Episode, Title, VideoSource } from "@/lib/catalog-client"
-import { readVideoSource, writeVideoSource } from "@/lib/catalog-client"
+import type { Episode, Title } from "@/lib/catalog-client"
 import {
   formatRuntime,
   loadWatchCatalog,
@@ -21,32 +19,18 @@ export default function WatchHomePage() {
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(true)
   const [seeding, setSeeding] = useState(false)
-  const [source, setSource] = useState<VideoSource>("all")
 
-  async function load(nextSource: VideoSource = source) {
-    const data = await loadWatchCatalog(nextSource)
+  async function load() {
+    const data = await loadWatchCatalog()
     setTitles(data.titles)
     setEpisodes(data.episodes)
   }
 
   useEffect(() => {
-    const initial = readVideoSource() || "all"
-    setSource(initial)
-    load(initial)
+    load()
       .catch((e) => setError(String(e.message || e)))
       .finally(() => setLoading(false))
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
-
-  function onSourceChange(next: VideoSource) {
-    setSource(next)
-    writeVideoSource(next)
-    setLoading(true)
-    setError("")
-    load(next)
-      .catch((e) => setError(String(e.message || e)))
-      .finally(() => setLoading(false))
-  }
 
   async function seed() {
     setSeeding(true)
@@ -79,9 +63,6 @@ export default function WatchHomePage() {
     <>
       <WatchChrome current="watch" />
       <main className="watch-main">
-        <div className="watch-toolbar">
-          <VideoSourceToggle variant="watch" value={source} onChange={onSourceChange} />
-        </div>
         {loading ? (
           <>
             <div className="watch-skel watch-skel-wide" aria-hidden />

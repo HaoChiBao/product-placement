@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation"
 import { useEffect, useState } from "react"
 
 import { TopBar } from "@/components/top-bar"
-import { VideoSourceToggle } from "@/components/video-source-toggle"
 import { VideoThumb, videoLabel as label } from "@/components/video-thumb"
 import {
   fmt,
@@ -13,13 +12,10 @@ import {
   listMoments,
   listVideos,
   mediaUrl,
-  readVideoSource,
   regionPct,
   session,
-  writeVideoSource,
   type CatalogMoment,
   type Video,
-  type VideoSource,
 } from "@/lib/catalog-client"
 
 function initials(s: string) {
@@ -32,29 +28,14 @@ export default function VideosPage() {
   const [error, setError] = useState("")
   const [q, setQ] = useState("")
   const [open, setOpen] = useState<Video | null>(null)
-  const [source, setSource] = useState<VideoSource>("all")
-
-  function load(nextSource: VideoSource) {
-    setVideos(null)
-    setError("")
-    listVideos(nextSource).then(setVideos).catch((e) => setError(String(e.message || e)))
-  }
 
   useEffect(() => {
     if (!session.get()) {
       router.replace("/")
       return
     }
-    const initial = readVideoSource() || "all"
-    setSource(initial)
-    load(initial)
+    listVideos().then(setVideos).catch((e) => setError(String(e.message || e)))
   }, [router])
-
-  function onSourceChange(next: VideoSource) {
-    setSource(next)
-    writeVideoSource(next)
-    load(next)
-  }
 
   const list = (videos || []).filter((v) => !q || `${v.title.name} ${v.name}`.toLowerCase().includes(q.toLowerCase()))
 
@@ -67,16 +48,13 @@ export default function VideosPage() {
             <div className="eyebrow">Creator marketplace</div>
             <h1 style={{ marginTop: 6 }}>Choose a video</h1>
           </div>
-          <div className="mk-head-tools">
-            <VideoSourceToggle value={source} onChange={onSourceChange} />
-            <label className="search">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
-                <circle cx="11" cy="11" r="7" />
-                <path d="m20 20-3.5-3.5" />
-              </svg>
-              <input placeholder="Search videos" value={q} onChange={(e) => setQ(e.target.value)} />
-            </label>
-          </div>
+          <label className="search">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.5-3.5" />
+            </svg>
+            <input placeholder="Search videos" value={q} onChange={(e) => setQ(e.target.value)} />
+          </label>
         </div>
 
         {error ? <p className="error">Couldn’t load videos: {error}</p> : null}
