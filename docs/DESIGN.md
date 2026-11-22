@@ -8,7 +8,7 @@ Longer term: per-viewer targeted placements inside shows (different brands for V
 
 ## Pipeline
 
-0. **Suggest** — shot cuts → stable ~5 s windows → YuNet faces + YOLOX props/surfaces → ranked, spread-out moments with a face-free bbox (feeds crop-and-stitch).
+0. **Suggest** — with `OPENROUTER_API_KEY`, 1 fps labelled contact sheets and a presence-gated box from Jev via OpenRouter. Otherwise shot cuts → stable ~5 s windows → YuNet faces + YOLOX props/surfaces. Either path returns ranked, spread-out moments with a face-free bbox (feeds crop-and-stitch).
 1. **Find target** — text / click / suggested region.
 2. **Track** — SAM 2 (overlay path) or skip when the generative backend edits the whole crop.
 3. **Crop** — padded face-free region around the placement.
