@@ -62,6 +62,22 @@ export function spawnEpisodeSuggest(episodeId: string): void {
   )
 }
 
+/** Re-run the moment finder for one episode with this brand in the prompt. */
+export function spawnBrandScan(episodeId: string, brandId: string): void {
+  spawnJob(
+    [
+      "-m",
+      "product_placement.jobs",
+      "brand-scan",
+      "--episode-id",
+      episodeId,
+      "--brand-id",
+      brandId,
+    ],
+    {}
+  )
+}
+
 export function spawnPlacementSwap(
   placementId: string,
   opts?: { testMode?: boolean; confirm?: boolean; method?: "wan" | "higgsfield" }

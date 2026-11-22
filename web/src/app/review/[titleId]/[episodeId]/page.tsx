@@ -17,12 +17,14 @@ import {
   getGenerationInfo,
   isScanned,
   getVideo,
-  listMoments,
+  listBrandMoments,
   listPlacements,
   mediaUrl,
   regionPct,
   saveCampaign,
   session,
+  startBrandScan,
+  type BrandScan,
   type CatalogMoment,
   type GenerationInfo,
   type Placement,
@@ -84,17 +86,42 @@ export default function ReviewPage() {
   const [holding, setHolding] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [gen, setGen] = useState<GenerationInfo | null>(null)
+  const [scan, setScan] = useState<BrandScan | null | undefined>(undefined)
+  const [brandName, setBrandName] = useState("")
   const [toast, showToast] = useToast()
   const vidRef = useRef<HTMLVideoElement>(null)
+  const scanRequested = useRef(false)
 
   const refresh = useCallback(
     async (bid: string) => {
-      const [ms, ps] = await Promise.all([listMoments(episodeId, bid), listPlacements(bid, episodeId)])
+      const [{ moments: ms, scan: sc }, ps] = await Promise.all([
+        listBrandMoments(episodeId, bid),
+        listPlacements(bid, episodeId),
+      ])
       setMoments(ms.filter((m) => !m.brand_fit?.vetoed).sort((a, b) => a.start_s - b.start_s))
+      setScan(sc)
       setPlacements(Object.fromEntries(ps.map((p) => [p.moment_id, p])))
     },
     [episodeId]
   )
+
+  // First visit for this brand: re-run the finder with the brand in the prompt.
+  const runBrandScan = useCallback(
+    async (bid: string) => {
+      scanRequested.current = true
+      try {
+        setScan(await startBrandScan(episodeId, bid))
+      } catch (e) {
+        showToast(e instanceof Error ? e.message : String(e))
+      }
+    },
+    [episodeId, showToast]
+  )
+
+  useEffect(() => {
+    if (!brandId || scan !== null || scanRequested.current) return
+    runBrandScan(brandId)
+  }, [brandId, scan, runBrandScan])
 
   useEffect(() => {
     const s = session.get()
@@ -103,6 +130,7 @@ export default function ReviewPage() {
       return
     }
     setBrandId(s.brandId)
+    setBrandName(s.profile?.business || "your brand")
     setHasAsset(s.hasAsset !== false)
     getVideo(titleId, episodeId)
       .then((v) => (v ? setVideo(v) : setError("This video no longer exists.")))
@@ -112,8 +140,11 @@ export default function ReviewPage() {
   }, [titleId, episodeId, router, refresh])
 
   const statusOf = useCallback((m: CatalogMoment): Status => placements[m.id]?.status || "pending", [placements])
+  const scanRunning = scan?.status === "running" || scan?.status === "queued"
   const needsPoll =
-    (moments || []).some((m) => IN_FLIGHT.includes(statusOf(m))) || (video && !isScanned(video))
+    (moments || []).some((m) => IN_FLIGHT.includes(statusOf(m))) ||
+    (video && !isScanned(video)) ||
+    scanRunning
 
   useEffect(() => {
     if (!brandId || !needsPoll) return
@@ -122,6 +153,12 @@ export default function ReviewPage() {
   }, [brandId, needsPoll, refresh])
 
   const list = useMemo(() => moments || [], [moments])
+
+  // The list is swapped for the brand's own spots when its scan lands.
+  useEffect(() => {
+    if (cur >= list.length && list.length) setCur(0)
+  }, [cur, list.length])
+
   const m = list[cur]
   const st = m ? statusOf(m) : "pending"
   const placement = m ? placements[m.id] : undefined
@@ -422,6 +459,27 @@ export default function ReviewPage() {
           </div>
 
           <div className="flex flex-1 flex-col gap-2.5 overflow-y-auto p-3">
+            {scanRunning ? (
+              <Panel className="flex items-center gap-2.5 p-3 text-[13px]">
+                <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                <span>
+                  <b className="font-semibold">Finding spots for {brandName}</b>
+                  <span className="block text-muted-foreground">
+                    Rescanning this video with your product in mind. These are the general spots until it finishes.
+                  </span>
+                </span>
+              </Panel>
+            ) : scan?.status === "failed" ? (
+              <Panel className="flex flex-col gap-2 p-3 text-[13px]">
+                <b className="font-semibold">Couldn’t find spots for {brandName}</b>
+                <span className="text-muted-foreground">Showing the general spots. {scan.error || ""}</span>
+                <Button size="sm" className="self-start" onClick={() => runBrandScan(brandId)}>
+                  Try again
+                </Button>
+              </Panel>
+            ) : scan?.status === "ready" ? (
+              <p className="px-1 text-[12.5px] text-muted-foreground">Spots picked for {brandName}.</p>
+            ) : null}
             {!hasAsset ? (
               <Panel className="flex flex-col gap-2 p-3 text-[13px]">
                 <b className="font-semibold">Add a product image to generate placements</b>

@@ -12,9 +12,18 @@ export async function GET(req: NextRequest) {
     if (!episodeId) {
       return NextResponse.json({ error: "episodeId required" }, { status: 400 })
     }
-    const args = ["list-moments", "--episode-id", episodeId]
-    if (brandId) args.push("--brand-id", brandId)
-    const moments = catalogCmd(args)
+    if (brandId) {
+      // The brand's own moments once its scan is ready, plus that scan's state.
+      const payload = catalogCmd([
+        "brand-moments",
+        "--episode-id",
+        episodeId,
+        "--brand-id",
+        brandId,
+      ])
+      return NextResponse.json(payload)
+    }
+    const moments = catalogCmd(["list-moments", "--episode-id", episodeId])
     return NextResponse.json({ moments })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

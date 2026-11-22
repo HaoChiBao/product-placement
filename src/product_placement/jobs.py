@@ -463,14 +463,99 @@ def reset_stale_suggest_running(conn) -> int:
     return int(getattr(result, "rowcount", 0) or 0)
 
 
-def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
-    """Download episode video from object store, run suggest(), persist moments + frames."""
+def _suggest_and_store(
+    conn,
+    ep: dict[str, Any],
+    *,
+    n: int,
+    brand: Any = None,
+) -> list[dict[str, Any]]:
+    """Download the episode, run suggest(), and replace its stored moments.
+
+    Without a brand this rewrites the brand-agnostic moments; with one it rewrites
+    only that brand's moments, so the two never clobber each other.
+    """
     import tempfile
 
-    from product_placement.catalog import get_episode, insert_moment
-    from product_placement.db import get_connection, init_schema, utc_now
+    from product_placement.catalog import get_title, insert_moment
+    from product_placement.catalog_keys import (
+        brand_moment_frame_key,
+        brand_slug,
+        moment_frame_key,
+    )
     from product_placement.object_store import get_object_store
     from product_placement.suggest import clamp_n, suggest
+
+    episode_id = str(ep["id"])
+    video_key = ep.get("video_key")
+    if not video_key:
+        raise ValueError(f"episode {episode_id} has no video_key")
+    brand_id = getattr(brand, "id", None)
+
+    store = get_object_store()
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        video_path = tmp_path / "episode.mp4"
+        store.get_file(video_key, video_path)
+        out_dir = tmp_path / "suggest"
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        moments = suggest(
+            video_path=video_path,
+            n=clamp_n(n),
+            out_dir=out_dir,
+            brand=brand,
+            use_clip=True,
+        )
+
+        if brand_id:
+            conn.execute(
+                "DELETE FROM moments WHERE episode_id = ? AND brand_id = ?",
+                (episode_id, brand_id),
+            )
+        else:
+            conn.execute(
+                "DELETE FROM moments WHERE episode_id = ? AND brand_id IS NULL",
+                (episode_id,),
+            )
+        conn.commit()
+
+        title = get_title(conn, id=str(ep["title_id"]))
+        slug = str((title or {}).get("slug") or "title")
+        season = int(ep.get("season") or 1)
+        episode_n = int(ep.get("episode_number") or 1)
+        bslug = brand_slug(getattr(brand, "name", "") or "", fallback=brand_id or "brand")
+
+        stored: list[dict[str, Any]] = []
+        for i, m in enumerate(moments):
+            if brand_id:
+                frame_key = brand_moment_frame_key(slug, season, episode_n, bslug, i + 1)
+            else:
+                frame_key = moment_frame_key(slug, season, episode_n, i + 1)
+            if m.frame_path.is_file():
+                store.put_file(m.frame_path, frame_key, content_type="image/jpeg")
+            row = insert_moment(
+                conn,
+                episode_id=episode_id,
+                start_s=m.start_s,
+                end_s=m.end_s,
+                region=m.region.as_dict(),
+                whats_there=m.whats_there,
+                score=m.score,
+                reason=m.reason,
+                frame_key=frame_key if m.frame_path.is_file() else None,
+                frame_w=m.frame_w,
+                frame_h=m.frame_h,
+                brand_id=brand_id,
+            )
+            stored.append(row)
+    return stored
+
+
+def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
+    """Download episode video from object store, run suggest(), persist moments + frames."""
+    from product_placement.catalog import get_episode
+    from product_placement.db import get_connection, init_schema, utc_now
 
     conn = get_connection()
     init_schema(conn)
@@ -478,8 +563,7 @@ def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
         ep = get_episode(conn, id=episode_id)
         if not ep:
             raise ValueError(f"episode not found: {episode_id}")
-        video_key = ep.get("video_key")
-        if not video_key:
+        if not ep.get("video_key"):
             raise ValueError(f"episode {episode_id} has no video_key")
 
         if not _claim_episode_suggest(conn, episode_id):
@@ -493,53 +577,7 @@ def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
                 "updated_at": utc_now(),
             }
 
-        store = get_object_store()
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-            video_path = tmp_path / "episode.mp4"
-            store.get_file(video_key, video_path)
-            out_dir = tmp_path / "suggest"
-            out_dir.mkdir(parents=True, exist_ok=True)
-
-            moments = suggest(
-                video_path=video_path,
-                n=clamp_n(n),
-                out_dir=out_dir,
-                brand=None,
-                use_clip=True,
-            )
-
-            # Replace prior moments for this episode (only after claim).
-            conn.execute("DELETE FROM moments WHERE episode_id = ?", (episode_id,))
-            conn.commit()
-
-            from product_placement.catalog import get_title
-            from product_placement.catalog_keys import moment_frame_key
-
-            title = get_title(conn, id=str(ep["title_id"]))
-            slug = str((title or {}).get("slug") or "title")
-            season = int(ep.get("season") or 1)
-            episode_n = int(ep.get("episode_number") or 1)
-
-            stored: list[dict[str, Any]] = []
-            for i, m in enumerate(moments):
-                frame_key = moment_frame_key(slug, season, episode_n, i + 1)
-                if m.frame_path.is_file():
-                    store.put_file(m.frame_path, frame_key, content_type="image/jpeg")
-                row = insert_moment(
-                    conn,
-                    episode_id=episode_id,
-                    start_s=m.start_s,
-                    end_s=m.end_s,
-                    region=m.region.as_dict(),
-                    whats_there=m.whats_there,
-                    score=m.score,
-                    reason=m.reason,
-                    frame_key=frame_key if m.frame_path.is_file() else None,
-                    frame_w=m.frame_w,
-                    frame_h=m.frame_h,
-                )
-                stored.append(row)
+        stored = _suggest_and_store(conn, ep, n=n)
 
         conn.execute(
             "UPDATE episodes SET suggest_status = ? WHERE id = ?",
@@ -562,6 +600,64 @@ def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
         except Exception:
             pass
         raise
+    finally:
+        conn.close()
+
+
+def run_brand_scan_job(episode_id: str, brand_id: str, *, n: int = 5) -> dict[str, Any]:
+    """Re-run the moment finder on one episode with a brand in the prompt.
+
+    The brand's name, product category and prefer/avoid rules go into the finder
+    prompt, so the model looks for objects that product could replace. Results are
+    stored as that brand's moments; list_moments serves them once this finishes.
+    """
+    from product_placement.catalog import (
+        _brand_from_row,
+        claim_brand_scan,
+        finish_brand_scan,
+        get_brand,
+        get_episode,
+    )
+    from product_placement.db import get_connection, init_schema, utc_now
+
+    conn = get_connection()
+    init_schema(conn)
+    try:
+        ep = get_episode(conn, id=episode_id)
+        if not ep:
+            raise ValueError(f"episode not found: {episode_id}")
+        brand_row = get_brand(conn, id=brand_id)
+        if not brand_row:
+            raise ValueError(f"brand not found: {brand_id}")
+
+        if not claim_brand_scan(conn, episode_id=episode_id, brand_id=brand_id):
+            return {
+                "episode_id": episode_id,
+                "brand_id": brand_id,
+                "skipped": True,
+                "reason": "already running or ready",
+                "updated_at": utc_now(),
+            }
+
+        try:
+            stored = _suggest_and_store(conn, ep, n=n, brand=_brand_from_row(brand_row, conn))
+        except Exception as exc:
+            finish_brand_scan(
+                conn,
+                episode_id=episode_id,
+                brand_id=brand_id,
+                status="failed",
+                error=str(exc)[:500] or exc.__class__.__name__,
+            )
+            raise
+        finish_brand_scan(conn, episode_id=episode_id, brand_id=brand_id, status="ready")
+        return {
+            "episode_id": episode_id,
+            "brand_id": brand_id,
+            "status": "ready",
+            "moments": stored,
+            "updated_at": utc_now(),
+        }
     finally:
         conn.close()
 
@@ -1023,6 +1119,11 @@ def build_parser() -> argparse.ArgumentParser:
     es.add_argument("--episode-id", required=True)
     es.add_argument("-n", type=int, default=5)
 
+    bs = sub.add_parser("brand-scan")
+    bs.add_argument("--episode-id", required=True)
+    bs.add_argument("--brand-id", required=True)
+    bs.add_argument("-n", type=int, default=5)
+
     br = sub.add_parser("brand-research")
     br.add_argument("--job-id", required=True)
     br.add_argument("--business", required=True)
@@ -1084,6 +1185,11 @@ def main(argv: list[str] | None = None) -> None:
             return
         if args.command == "episode-suggest":
             result = run_episode_suggest_job(args.episode_id, n=args.n)
+            print(json.dumps(result, indent=2, default=str))
+            return
+
+        if args.command == "brand-scan":
+            result = run_brand_scan_job(args.episode_id, args.brand_id, n=args.n)
             print(json.dumps(result, indent=2, default=str))
             return
         if args.command == "brand-research":
