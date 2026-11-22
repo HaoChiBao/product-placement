@@ -298,6 +298,229 @@ def run_swap_job(
         raise
 
 
+def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
+    """Download episode video from object store, run suggest(), persist moments + frames."""
+    import tempfile
+
+    from product_placement.catalog import get_episode, insert_moment
+    from product_placement.db import get_connection, init_schema, utc_now
+    from product_placement.object_store import get_object_store
+    from product_placement.suggest import clamp_n, suggest
+
+    conn = get_connection()
+    init_schema(conn)
+    try:
+        ep = get_episode(conn, id=episode_id)
+        if not ep:
+            raise ValueError(f"episode not found: {episode_id}")
+        video_key = ep.get("video_key")
+        if not video_key:
+            raise ValueError(f"episode {episode_id} has no video_key")
+
+        conn.execute(
+            "UPDATE episodes SET suggest_status = ? WHERE id = ?",
+            ("running", episode_id),
+        )
+        conn.commit()
+
+        store = get_object_store()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "episode.mp4"
+            store.get_file(video_key, video_path)
+            out_dir = tmp_path / "suggest"
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            moments = suggest(
+                video_path=video_path,
+                n=clamp_n(n),
+                out_dir=out_dir,
+                brand=None,
+                use_clip=True,
+            )
+
+            # Replace prior moments for this episode.
+            conn.execute("DELETE FROM moments WHERE episode_id = ?", (episode_id,))
+            conn.commit()
+
+            stored: list[dict[str, Any]] = []
+            for i, m in enumerate(moments):
+                frame_key = f"moments/{episode_id}/moment_{i + 1:02d}.jpg"
+                if m.frame_path.is_file():
+                    store.put_file(m.frame_path, frame_key, content_type="image/jpeg")
+                row = insert_moment(
+                    conn,
+                    episode_id=episode_id,
+                    start_s=m.start_s,
+                    end_s=m.end_s,
+                    region=m.region.as_dict(),
+                    whats_there=m.whats_there,
+                    score=m.score,
+                    reason=m.reason,
+                    frame_key=frame_key if m.frame_path.is_file() else None,
+                    frame_w=m.frame_w,
+                    frame_h=m.frame_h,
+                )
+                stored.append(row)
+
+        conn.execute(
+            "UPDATE episodes SET suggest_status = ? WHERE id = ?",
+            ("ready", episode_id),
+        )
+        conn.commit()
+        return {
+            "episode_id": episode_id,
+            "suggest_status": "ready",
+            "moments": stored,
+            "updated_at": utc_now(),
+        }
+    except Exception as exc:
+        try:
+            conn.execute(
+                "UPDATE episodes SET suggest_status = ? WHERE id = ?",
+                ("failed", episode_id),
+            )
+            conn.commit()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def run_placement_swap_job(
+    placement_id: str,
+    *,
+    confirm: bool,
+    test_mode: bool = True,
+) -> dict[str, Any]:
+    """Render an approved placement: queued → rendering → ready/failed; store clip."""
+    import os
+    import tempfile
+
+    from product_placement.catalog import get_brand, get_episode, get_placement, update_placement
+    from product_placement.db import fetchone_dict, get_connection, init_schema
+    from product_placement.object_store import get_object_store
+
+    # Paid path requires explicit confirm; test_mode defaults True (mock).
+    if not test_mode and not confirm:
+        raise ValueError("paid placement swap requires confirm=True (and test_mode=False)")
+    if not confirm:
+        raise ValueError("confirm=true is required before a placement swap")
+
+    conn = get_connection()
+    init_schema(conn)
+    try:
+        placement = get_placement(conn, id=placement_id)
+        if not placement:
+            raise ValueError(f"placement not found: {placement_id}")
+
+        moment = fetchone_dict(
+            conn, "SELECT * FROM moments WHERE id = ?", (placement["moment_id"],)
+        )
+        if not moment:
+            raise ValueError(f"moment not found: {placement['moment_id']}")
+
+        ep = get_episode(conn, id=placement["episode_id"] or moment["episode_id"])
+        if not ep or not ep.get("video_key"):
+            raise ValueError("episode video missing")
+
+        brand_row = get_brand(conn, id=placement["brand_id"])
+        if not brand_row:
+            raise ValueError(f"brand not found: {placement['brand_id']}")
+
+        update_placement(
+            conn,
+            placement_id,
+            status="rendering",
+            test_mode=1 if test_mode else 0,
+            error=None,
+        )
+
+        store = get_object_store()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "episode.mp4"
+            store.get_file(ep["video_key"], video_path)
+
+            # Resolve product asset: prefer DB object_key, else file brand dir.
+            product_path = tmp_path / "product.png"
+            assets = brand_row.get("assets") or []
+            if assets and assets[0].get("object_key"):
+                store.get_file(assets[0]["object_key"], product_path)
+            else:
+                from product_placement.brand import load_brand, primary_asset_path
+
+                brand = load_brand(brand_row["id"])
+                asset = primary_asset_path(brand)
+                if not asset or not asset.is_file():
+                    raise ValueError(f"brand {brand_row['id']} has no product asset")
+                product_path.write_bytes(asset.read_bytes())
+
+            region = json.loads(moment["region_json"] or "{}")
+            target = moment.get("whats_there") or "object"
+
+            # Force mock when test_mode; paid path leaves MOCK_HIGGSFIELD to env.
+            prev_mock = os.environ.get("MOCK_HIGGSFIELD")
+            if test_mode:
+                os.environ["MOCK_HIGGSFIELD"] = "1"
+            try:
+                job_id = new_job_id()
+                result = run_swap_job(
+                    job_id,
+                    video_path=video_path,
+                    product_path=product_path,
+                    start_s=float(moment["start_s"]),
+                    end_s=float(moment["end_s"]),
+                    region=region,
+                    target=target,
+                    confirm=True,
+                    brand_id=brand_row["id"],
+                )
+            finally:
+                if test_mode:
+                    if prev_mock is None:
+                        os.environ.pop("MOCK_HIGGSFIELD", None)
+                    else:
+                        os.environ["MOCK_HIGGSFIELD"] = prev_mock
+
+            result_path = Path((result.get("result") or {}).get("result_path") or "")
+            if not result_path.is_file():
+                # Fallback: look under job dir
+                result_path = job_dir(job_id) / "result.mp4"
+            if not result_path.is_file():
+                raise RuntimeError("swap completed but result clip missing")
+
+            clip_key = f"placements/{placement_id}/clip.mp4"
+            store.put_file(result_path, clip_key, content_type="video/mp4")
+            backend = (result.get("result") or {}).get("backend") or (
+                "mock" if test_mode else "seedance"
+            )
+            updated = update_placement(
+                conn,
+                placement_id,
+                status="ready",
+                clip_key=clip_key,
+                backend=backend,
+                test_mode=1 if test_mode else 0,
+                error=None,
+            )
+            return updated
+    except Exception as exc:
+        try:
+            update_placement(
+                conn,
+                placement_id,
+                status="failed",
+                error=str(exc)[:2000],
+            )
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="product_placement.jobs")
     sub = p.add_subparsers(dest="command", required=True)
@@ -319,6 +542,27 @@ def build_parser() -> argparse.ArgumentParser:
     sw.add_argument("--confirm", action="store_true")
     sw.add_argument("--resolution", default="720p")
     sw.add_argument("--brand-id", default=None)
+
+    es = sub.add_parser("episode-suggest")
+    es.add_argument("--episode-id", required=True)
+    es.add_argument("-n", type=int, default=5)
+
+    ps = sub.add_parser("placement-swap")
+    ps.add_argument("--placement-id", required=True)
+    ps.add_argument("--confirm", action="store_true")
+    ps.add_argument(
+        "--test-mode",
+        dest="test_mode",
+        action="store_true",
+        default=True,
+        help="Force mock backend (default)",
+    )
+    ps.add_argument(
+        "--no-test-mode",
+        dest="test_mode",
+        action="store_false",
+        help="Allow paid Seedance path (requires --confirm)",
+    )
     return p
 
 
@@ -348,6 +592,18 @@ def main(argv: list[str] | None = None) -> None:
                 resolution=args.resolution,
                 brand_id=args.brand_id,
             )
+            return
+        if args.command == "episode-suggest":
+            result = run_episode_suggest_job(args.episode_id, n=args.n)
+            print(json.dumps(result, indent=2, default=str))
+            return
+        if args.command == "placement-swap":
+            result = run_placement_swap_job(
+                args.placement_id,
+                confirm=bool(args.confirm),
+                test_mode=bool(args.test_mode),
+            )
+            print(json.dumps(result, indent=2, default=str))
             return
         raise SystemExit(f"unknown command {args.command}")
     except Exception as exc:
