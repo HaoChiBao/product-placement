@@ -566,7 +566,7 @@ export default function ReviewPage() {
                     ? "Approving runs the real placement pipeline (Qwen edit + Seedance)."
                     : "Approving runs a full-clip Wan 3.0 swap."
                   : gen.mock
-                    ? "Approving runs mock generation (MOCK_HIGGSFIELD is on)."
+                    ? null
                     : gen.method === "higgsfield"
                       ? "Approving queues generation. Without a Higgsfield API key the placement stays queued — no fake clip is created."
                       : (gen.reason || "").toLowerCase().includes("s3")
