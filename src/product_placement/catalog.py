@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -1512,6 +1513,7 @@ def insert_moment(
     frame_h: int = 0,
     moment_id: str | None = None,
     brand_id: str | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     mid = moment_id or new_id()
     region_json = region if isinstance(region, str) else json.dumps(region)
@@ -1534,7 +1536,8 @@ def insert_moment(
             brand_id,
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return fetchone_dict(conn, "SELECT * FROM moments WHERE id = ?", (mid,))  # type: ignore[return-value]
 
 
@@ -1828,6 +1831,28 @@ def create_brand(
     return get_brand(conn, id=bid)  # type: ignore[return-value]
 
 
+def find_brand_by_name(conn: Connection, name: str) -> dict[str, Any] | None:
+    cleaned = name.strip()
+    if not cleaned:
+        return None
+    return fetchone_dict(
+        conn,
+        "SELECT * FROM brands WHERE lower(name) = lower(?) ORDER BY created_at LIMIT 1",
+        (cleaned,),
+    )
+
+
+def find_or_create_brand(conn: Connection, name: str) -> dict[str, Any]:
+    """Same row brand onboarding writes (create_brand), or the existing name match."""
+    cleaned = name.strip()
+    if not cleaned:
+        raise ValueError("brand required")
+    existing = find_brand_by_name(conn, cleaned)
+    if existing:
+        return get_brand(conn, id=existing["id"])  # type: ignore[return-value]
+    return create_brand(conn, name=cleaned)
+
+
 # ---------------------------------------------------------------------------
 # Placements
 # ---------------------------------------------------------------------------
@@ -1934,6 +1959,303 @@ def update_placement(conn: Connection, placement_id: str, **fields: Any) -> dict
     conn.execute(f"UPDATE placements SET {cols} WHERE id = ?", vals)
     conn.commit()
     return get_placement(conn, id=placement_id)  # type: ignore[return-value]
+
+
+PLACEMENT_START_MATCH_S = 0.001
+
+
+def _placement_items(payload: Any) -> list[Any]:
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict) and isinstance(payload.get("placements"), list):
+        return list(payload["placements"])
+    raise ValueError("expected a list of placements")
+
+
+def _parse_placement_item(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise ValueError("expected a placement object")
+    episode_id = str(item.get("episode_id") or "").strip()
+    brand = str(item.get("brand") or "").strip()
+    clip_key = str(item.get("video_s3_key") or "").strip()
+    label = item.get("object")
+    if label is None or not str(label).strip():
+        label = item.get("label")
+    label = str(label or "").strip()
+    if not episode_id:
+        raise ValueError("episode_id required")
+    if not brand:
+        raise ValueError("brand required")
+    if not label:
+        raise ValueError("object required")
+    if not clip_key:
+        raise ValueError("video_s3_key required")
+    if "cost_usd" not in item or item.get("cost_usd") is None or item.get("cost_usd") == "":
+        raise ValueError("cost_usd required")
+    try:
+        start_s = float(item["start_s"])
+        end_s = float(item["end_s"])
+        cost_usd = float(item["cost_usd"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("start_s, end_s, and cost_usd must be numbers") from exc
+    if not all(math.isfinite(n) for n in (start_s, end_s, cost_usd)):
+        raise ValueError("start_s, end_s, and cost_usd must be numbers")
+    if end_s <= start_s:
+        raise ValueError("end_s must be greater than start_s")
+    region = item.get("region")
+    return {
+        "episode_id": episode_id,
+        "start_s": start_s,
+        "end_s": end_s,
+        "brand": brand,
+        "label": label,
+        "clip_key": clip_key,
+        "cost_usd": cost_usd,
+        "region": region,
+    }
+
+
+def _window_start(row: dict[str, Any]) -> float:
+    if row.get("clip_start_s") is not None:
+        return float(row["clip_start_s"])
+    return float(row["moment_start_s"])
+
+
+def _finish_imported_placement(
+    conn: Connection,
+    placement_id: str,
+    *,
+    clip_key: str,
+    start_s: float,
+    end_s: float,
+    cost_usd: float,
+) -> dict[str, Any]:
+    """Same fields the Wan render writes once a placement is finished."""
+    return update_placement(
+        conn,
+        placement_id,
+        status="ready",
+        clip_key=clip_key,
+        backend="wan-3.0",
+        test_mode=0,
+        error=None,
+        cost_usd=cost_usd,
+        clip_start_s=start_s,
+        clip_end_s=end_s,
+    )
+
+
+def import_finished_placements(conn: Connection, payload: Any) -> dict[str, Any]:
+    """Create or update ready placements for already-uploaded swap clips.
+
+    Identity is episode_id + start_s + brand name. The clip key is stored as
+    clip_key, which /watch plays across clip_start_s..clip_end_s.
+    """
+    parsed = [_parse_placement_item(item) for item in _placement_items(payload)]
+    for item in parsed:
+        if not get_episode(conn, id=item["episode_id"]):
+            raise ValueError(f"episode not found: {item['episode_id']}")
+
+    written: list[dict[str, Any]] = []
+    for item in parsed:
+        brand = find_or_create_brand(conn, item["brand"])
+        rows = fetchall_dicts(
+            conn,
+            "SELECT p.*, m.start_s AS moment_start_s "
+            "FROM placements p JOIN moments m ON m.id = p.moment_id "
+            "WHERE p.episode_id = ? AND p.brand_id = ? "
+            "ORDER BY p.created_at",
+            (item["episode_id"], brand["id"]),
+        )
+        match = next(
+            (
+                row
+                for row in rows
+                if abs(_window_start(row) - item["start_s"]) <= PLACEMENT_START_MATCH_S
+            ),
+            None,
+        )
+        region = item["region"] if isinstance(item["region"], dict) else {
+            "x": 0,
+            "y": 0,
+            "w": 1920,
+            "h": 1080,
+        }
+        if match:
+            conn.execute(
+                "UPDATE moments SET start_s = ?, end_s = ?, whats_there = ? WHERE id = ?",
+                (item["start_s"], item["end_s"], item["label"], match["moment_id"]),
+            )
+            conn.commit()
+            row = _finish_imported_placement(
+                conn,
+                match["id"],
+                clip_key=item["clip_key"],
+                start_s=item["start_s"],
+                end_s=item["end_s"],
+                cost_usd=item["cost_usd"],
+            )
+            action = "updated"
+        else:
+            moment = insert_moment(
+                conn,
+                episode_id=item["episode_id"],
+                start_s=item["start_s"],
+                end_s=item["end_s"],
+                region=region,
+                whats_there=item["label"],
+                score=1.0,
+                reason="Imported finished swap",
+                brand_id=brand["id"],
+            )
+            now = utc_now()
+            pid = new_id()
+            conn.execute(
+                "INSERT INTO placements (id, brand_id, moment_id, episode_id, status, clip_key, "
+                "error, test_mode, backend, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    pid,
+                    brand["id"],
+                    moment["id"],
+                    item["episode_id"],
+                    "ready",
+                    item["clip_key"],
+                    None,
+                    0,
+                    "wan-3.0",
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            row = _finish_imported_placement(
+                conn,
+                pid,
+                clip_key=item["clip_key"],
+                start_s=item["start_s"],
+                end_s=item["end_s"],
+                cost_usd=item["cost_usd"],
+            )
+            action = "created"
+        refresh_campaign_for_placement(conn, row["id"])
+        row["brand_name"] = brand["name"]
+        row["action"] = action
+        written.append(row)
+    return {"placements": written}
+
+
+def _parse_import_moment(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        raise ValueError("moment must be an object")
+    try:
+        start_s = float(item["start_s"])
+        end_s = float(item["end_s"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("moment start_s and end_s must be numbers") from exc
+    if not math.isfinite(start_s) or not math.isfinite(end_s):
+        raise ValueError("moment start_s and end_s must be numbers")
+    if end_s <= start_s:
+        raise ValueError("moment end_s must be greater than start_s")
+    region_raw = item.get("region")
+    if isinstance(region_raw, str):
+        try:
+            region_raw = json.loads(region_raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError("invalid region") from exc
+    if not isinstance(region_raw, dict):
+        raise ValueError("region required")
+    try:
+        region = {key: int(round(float(region_raw[key]))) for key in ("x", "y", "w", "h")}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("region requires x, y, w, h") from exc
+    if region["x"] < 0 or region["y"] < 0 or region["w"] < 1 or region["h"] < 1:
+        raise ValueError("invalid region")
+    try:
+        score = float(item.get("score") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("score must be a number") from exc
+    if not math.isfinite(score):
+        raise ValueError("score must be a number")
+    frame_key = item.get("frame_key")
+    if frame_key is None or not str(frame_key).strip():
+        frame_key = item.get("frame_s3_key")
+    frame_key = str(frame_key).strip() if frame_key else None
+    try:
+        frame_w = int(item.get("frame_w") or 0)
+        frame_h = int(item.get("frame_h") or 0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("frame_w and frame_h must be integers") from exc
+    return {
+        "start_s": start_s,
+        "end_s": end_s,
+        "region": region,
+        "whats_there": str(item.get("whats_there") or ""),
+        "score": score,
+        "reason": str(item.get("reason") or ""),
+        "frame_key": frame_key or None,
+        "frame_w": frame_w,
+        "frame_h": frame_h,
+    }
+
+
+def replace_generic_moments(conn: Connection, payload: Any) -> dict[str, Any]:
+    """Replace brand-agnostic moments for one episode. Brand moments stay.
+
+    The previous generic rows are returned as backup. One transaction covers
+    the delete and the inserts.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("expected an object with episode_id and moments")
+    episode_id = str(payload.get("episode_id") or "").strip()
+    raw_moments = payload.get("moments")
+    if not episode_id:
+        raise ValueError("episode_id required")
+    if not isinstance(raw_moments, list):
+        raise ValueError("moments required")
+    if not get_episode(conn, id=episode_id):
+        raise ValueError(f"episode not found: {episode_id}")
+    prepared = [_parse_import_moment(item) for item in raw_moments]
+    backup = fetchall_dicts(
+        conn,
+        "SELECT * FROM moments WHERE episode_id = ? AND brand_id IS NULL ORDER BY start_s",
+        (episode_id,),
+    )
+    try:
+        conn.execute(
+            "DELETE FROM moments WHERE episode_id = ? AND brand_id IS NULL",
+            (episode_id,),
+        )
+        inserted: list[dict[str, Any]] = []
+        for item in prepared:
+            inserted.append(
+                insert_moment(
+                    conn,
+                    episode_id=episode_id,
+                    start_s=item["start_s"],
+                    end_s=item["end_s"],
+                    region=item["region"],
+                    whats_there=item["whats_there"],
+                    score=item["score"],
+                    reason=item["reason"],
+                    frame_key=item["frame_key"],
+                    frame_w=item["frame_w"],
+                    frame_h=item["frame_h"],
+                    brand_id=None,
+                    commit=False,
+                )
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {
+        "episode_id": episode_id,
+        "backup": backup,
+        "deleted": len(backup),
+        "inserted": len(inserted),
+        "moments": inserted,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2069,8 +2391,9 @@ def get_watch_payload(
 
     placements: list[dict[str, Any]] = []
     sql = (
-        "SELECT p.*, m.start_s, m.end_s, m.region_json, m.whats_there "
+        "SELECT p.*, m.start_s, m.end_s, m.region_json, m.whats_there, b.name AS brand_name "
         "FROM placements p JOIN moments m ON m.id = p.moment_id "
+        "LEFT JOIN brands b ON b.id = p.brand_id "
         "WHERE p.episode_id = ? AND p.status = 'ready'"
     )
     params: list[Any] = [ep["id"]]
@@ -2099,6 +2422,7 @@ def get_watch_payload(
                 "clip_url": store.public_or_presigned_url(clip_key) if clip_key else None,
                 "region": json.loads(r["region_json"]) if r.get("region_json") else None,
                 "whats_there": r.get("whats_there"),
+                "brand_name": r.get("brand_name") or "",
                 "backend": r.get("backend"),
             }
         )
@@ -2445,6 +2769,22 @@ def _print_json(obj: Any) -> None:
     print(json.dumps(obj, indent=2, default=str))
 
 
+def _read_json_input(spec: str) -> Any:
+    if spec == "-":
+        raw = sys.stdin.read()
+    else:
+        path = Path(spec)
+        if not path.is_file():
+            raise ValueError(f"json file not found: {spec}")
+        raw = path.read_text()
+    if not raw.strip():
+        raise ValueError("expected JSON body")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON: {exc}") from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     json_parent = argparse.ArgumentParser(add_help=False)
     json_parent.add_argument(
@@ -2577,6 +2917,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=("draft", "in_progress", "live"),
     )
+
+    imp_pl = add("import-placements")
+    imp_pl.add_argument("--payload", required=True, help="JSON file path, or - for stdin")
+
+    imp_mo = add("import-moments")
+    imp_mo.add_argument("--payload", required=True, help="JSON file path, or - for stdin")
 
     wp = add("get-watch-payload")
     wp.add_argument("--title-slug", required=True)
@@ -2798,6 +3144,20 @@ def main(argv: list[str] | None = None) -> None:
                     status=args.status,
                 )
             )
+            return
+
+        if args.command == "import-placements":
+            try:
+                _print_json(import_finished_placements(conn, _read_json_input(args.payload)))
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            return
+
+        if args.command == "import-moments":
+            try:
+                _print_json(replace_generic_moments(conn, _read_json_input(args.payload)))
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
             return
 
         if args.command == "get-watch-payload":

@@ -142,6 +142,7 @@ export function WatchClient({
               <PlacementPlayer
                 videoUrl={data.video_url}
                 posterUrl={data.poster_url}
+                durationS={data.episode.duration_s}
                 placements={(data.placements || []).filter((p) => p.clip_url)}
               />
               <div className="flex flex-wrap items-baseline justify-between gap-2.5 px-1 pt-4">
