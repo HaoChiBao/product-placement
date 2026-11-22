@@ -1,0 +1,9 @@
+command: python -m product_placement swap --clip assets/samples/hand_held_cup.mp4 --target "coffee cup" --product assets/samples/soda_can.png --out artifacts/hand_held_swap_out.mp4 --device cpu --work-dir runs/hand_held_proof --sam-checkpoint checkpoints/sam2.1_hiera_tiny.pt
+source: https://www.pexels.com/video/person-holding-a-cup-of-hot-coffee-6204700/
+license: Pexels License
+device: cpu
+runtime_seconds: 192.4
+frames: 117 @ 12.0 fps
+detection: label=coffee cup score=0.922 box=[25.84, 235.31, 279.94, 470.86]
+late_frame: 116
+mask_area frame0=36386 mid=38160 late=35878 min=35755 max=38283
