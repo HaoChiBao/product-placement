@@ -43,8 +43,6 @@ FRAMES_PER_CALL = 8
 POOL = 8
 MERGE_IOU = 0.3
 VISIBILITY_MIN = 0.3
-# A single keyframe is an instant. Swap rejects a zero-length moment.
-MIN_SPAN_S = 0.1
 CALL_TIMEOUT_S = 120.0
 JPEG_QUALITY = 90
 
@@ -137,20 +135,17 @@ def finder_prompt(times: list[float], brand: Any) -> str:
     n = len(times)
     last = max(0, n - 1)
     return (
-        "You are finding EXISTING visible objects in these video frames that an editor could swap "
-        "for a branded product: bottles, glasses, cups, mugs, cans, phones, laptops, and other devices, "
-        "plus food or drink packages, boxes, bags, and watches. "
-        "Only list objects that are actually visible in the frame. "
-        "Never mark an empty surface, tabletop, counter, desk, floor, or wall, and never list people or clothing. "
+        "You are finding EXISTING physical objects in these video frames that an editor could swap "
+        "for a branded product (bottle, can, glass, cup, mug, phone, laptop, food or drink package, "
+        "box, bag, watch). Only list objects actually visible; never empty surfaces, people or clothing. "
         f"There are {n} frames in order ({listing}). "
-        f"For each object return frame (the frame index, 0 to {last}), "
-        "label (a short specific noun phrase such as 'green wine bottle'), "
+        f"For each object: frame (the frame index, 0 to {last}), "
+        "label (short specific noun phrase, e.g. 'green wine bottle'), "
         "category (one word: bottle, wine_glass, glass, cup, can, phone, laptop, plate, food, other), "
-        "swap_with (the suggested swap-in product whose shape fits the object), "
-        "visibility (how unoccluded and large it is, from 0 to 1), "
-        "and box_2d as [ymin, xmin, ymax, xmax] with each edge from 0 to 1000 "
-        "(0 is the top or left, 1000 is the bottom or right). "
-        'Reply with JSON only: {"objects":[...]}. At most 10 objects per frame, most swappable first.'
+        "swap_with (product type that fits its shape), "
+        "visibility (0-1: how unoccluded and large), "
+        "and box_2d [ymin, xmin, ymax, xmax] normalized 0-1000. "
+        'JSON only: {"objects":[...]}, at most 10 per frame, most swappable first.'
         + brand_hint(brand)
     )
 
@@ -179,15 +174,9 @@ def _label_tokens(label: str) -> frozenset[str]:
     return frozenset(tok for tok in re.findall(r"[a-z0-9]+", label.lower()) if tok not in _STOP)
 
 
-def labels_similar(a: str, b: str) -> bool:
-    ta = _label_tokens(a)
-    tb = _label_tokens(b)
-    if not ta or not tb:
-        left = a.strip().lower()
-        return bool(left) and left == b.strip().lower()
-    if ta <= tb or tb <= ta:
-        return True
-    return len(ta & tb) / len(ta | tb) >= 0.5
+def normalize_category(category: str) -> str:
+    text = (category or "other").strip().lower() or "other"
+    return "plate" if text == "food" else text
 
 
 def _is_surface(label: str, category: str) -> bool:
@@ -321,52 +310,123 @@ class Track:
     frame_key: int
 
 
-def clamp_track_window(
-    times: list[float], shot_start: float, shot_end: float
+def _containment(a: BBox, b: BBox) -> float:
+    ax2, ay2 = a.x + a.w, a.y + a.h
+    bx2, by2 = b.x + b.w, b.y + b.h
+    ix = max(0, min(ax2, bx2) - max(a.x, b.x))
+    iy = max(0, min(ay2, by2) - max(a.y, b.y))
+    inter = ix * iy
+    return inter / max(1, min(a.area, b.area))
+
+
+def box_similarity(a: BBox, b: BBox) -> float:
+    """IoU, or a slightly discounted score when one box contains the other."""
+    overlap = a.iou(b)
+    contained = _containment(a, b)
+    if contained > 0.8:
+        return max(overlap, 0.9 * contained)
+    return overlap
+
+
+def track_window(
+    times: list[float],
+    keyframes: list[float],
+    shot_start: float,
+    shot_end: float,
 ) -> tuple[float, float]:
-    """First and last sighting, clamped to the shot. A single sighting gets a short hold."""
+    """Shot edge when the object reaches that edge's keyframe, otherwise the midpoint."""
     if not times:
         raise ValueError("times")
     shot_start = float(shot_start)
     shot_end = float(shot_end)
     if shot_end < shot_start:
         shot_start, shot_end = shot_end, shot_start
-    start = min(max(min(times), shot_start), shot_end)
-    end = min(max(max(times), shot_start), shot_end)
+    kt = sorted(float(t) for t in keyframes) or sorted(float(t) for t in times)
+
+    def _index(t: float) -> int:
+        return min(range(len(kt)), key=lambda i: abs(kt[i] - t))
+
+    i0 = _index(min(times))
+    i1 = _index(max(times))
+    if i1 < i0:
+        i0, i1 = i1, i0
+    start = shot_start if i0 == 0 else round((kt[i0 - 1] + kt[i0]) / 2.0, 3)
+    end = shot_end if i1 == len(kt) - 1 else round((kt[i1] + kt[i1 + 1]) / 2.0, 3)
+    start = min(max(float(start), shot_start), shot_end)
+    end = min(max(float(end), shot_start), shot_end)
     if end < start:
         start, end = end, start
-    if end - start < MIN_SPAN_S:
-        end = min(shot_end, start + MIN_SPAN_S)
-        if end - start < MIN_SPAN_S:
-            start = max(shot_start, end - MIN_SPAN_S)
     if end <= start:
         return shot_start, shot_end
     return start, end
 
 
+def _dedupe_frame(hits: list[Hit]) -> list[Hit]:
+    keep: list[Hit] = []
+    for hit in hits:
+        category = normalize_category(hit.category)
+        if category == "plate" and any(
+            normalize_category(prev.category) == "plate" and _containment(prev.box, hit.box) > 0.8
+            for prev in keep
+        ):
+            continue
+        keep.append(hit)
+    return keep
+
+
+def _dedupe_hits(hits: list[Hit]) -> list[Hit]:
+    grouped: dict[tuple[int, float], list[Hit]] = {}
+    order: list[tuple[int, float]] = []
+    for hit in hits:
+        key = (hit.shot_i, hit.time_s)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(hit)
+    deduped: list[Hit] = []
+    for key in order:
+        deduped.extend(_dedupe_frame(grouped[key]))
+    return deduped
+
+
+def _majority_label(hits: list[Hit]) -> str:
+    counts: dict[str, int] = {}
+    first: dict[str, int] = {}
+    for index, hit in enumerate(hits):
+        counts[hit.label] = counts.get(hit.label, 0) + 1
+        first.setdefault(hit.label, index)
+    return max(counts, key=lambda label: (counts[label], -first[label]))
+
+
 class _Group:
     def __init__(self, hit: Hit) -> None:
         self.shot_i = hit.shot_i
+        self.category = normalize_category(hit.category)
         self.hits: list[Hit] = [hit]
 
 
-def merge_hits(hits: list[Hit], shots: list[tuple[float, float]]) -> list[Track]:
-    """One track per object per shot. Same label family and overlapping boxes merge."""
+def merge_hits(
+    hits: list[Hit],
+    shots: list[tuple[float, float]],
+    keyframes: list[list[float]] | None = None,
+) -> list[Track]:
+    """One track per object per shot. Same category and overlapping boxes merge."""
     groups: list[_Group] = []
-    ordered = sorted(hits, key=lambda h: (h.shot_i, h.time_s, -h.visibility))
+    ordered = sorted(_dedupe_hits(hits), key=lambda h: (h.shot_i, h.time_s, -h.visibility))
     for hit in ordered:
+        category = normalize_category(hit.category)
         best: _Group | None = None
-        best_iou = 0.0
+        best_score = 0.0
         for group in groups:
-            if group.shot_i != hit.shot_i:
+            if group.shot_i != hit.shot_i or group.category != category:
                 continue
-            if not any(labels_similar(hit.label, prev.label) for prev in group.hits):
+            if group.hits[-1].time_s == hit.time_s:
                 continue
-            iou = max(hit.box.iou(prev.box) for prev in group.hits)
-            if iou > best_iou:
+            score = max(box_similarity(prev.box, hit.box) for prev in group.hits)
+            if score > best_score:
                 best = group
-                best_iou = iou
-        if best is not None and best_iou >= MERGE_IOU:
+                best_score = score
+        if best is not None and best_score > MERGE_IOU:
             best.hits.append(hit)
         else:
             groups.append(_Group(hit))
@@ -379,21 +439,28 @@ def merge_hits(hits: list[Hit], shots: list[tuple[float, float]]) -> list[Track]
             continue
         earliest = min(group.hits, key=lambda h: (h.time_s, -h.visibility))
         clearest = max(group.hits, key=lambda h: (h.visibility, -h.time_s))
-        start_s, end_s = clamp_track_window(
-            [h.time_s for h in group.hits], shots[group.shot_i][0], shots[group.shot_i][1]
+        shot_frames = []
+        if keyframes is not None and group.shot_i < len(keyframes):
+            shot_frames = keyframes[group.shot_i]
+        start_s, end_s = track_window(
+            [h.time_s for h in group.hits],
+            shot_frames,
+            shots[group.shot_i][0],
+            shots[group.shot_i][1],
         )
+        swap = earliest.swap_with or next((h.swap_with for h in group.hits if h.swap_with), "")
         tracks.append(
             Track(
                 shot_i=group.shot_i,
-                label=clearest.label,
-                category=clearest.category,
-                swap_with=clearest.swap_with or earliest.swap_with,
+                label=_majority_label(group.hits),
+                category=group.category,
+                swap_with=swap,
                 visibility=sum(h.visibility for h in group.hits) / len(group.hits),
-                box=earliest.box,
+                box=clearest.box,
                 start_s=start_s,
                 end_s=end_s,
                 sightings=len(group.hits),
-                frame_key=earliest.key,
+                frame_key=clearest.key,
             )
         )
     return tracks
@@ -669,7 +736,10 @@ def suggest_with_jev(
                     "product identification failed; no frame batch returned a valid answer"
                 )
 
-            tracks = merge_hits(hits, shot_bounds)
+            shot_frames: list[list[float]] = [[] for _ in shots]
+            for kf in keyframes:
+                shot_frames[kf.shot_i].append(kf.time_s)
+            tracks = merge_hits(hits, shot_bounds, shot_frames)
             _diag(len(tracks))
             if not tracks:
                 raise _none_found()

@@ -17,21 +17,19 @@ from product_placement.brand import Brand, BrandRules
 from product_placement.jev_moments import (
     DEFAULT_MODEL,
     FRAMES_PER_CALL,
-    MIN_SPAN_S,
     OPENROUTER_URL,
     VISIBILITY_MIN,
     call_validated,
     chunked,
-    clamp_track_window,
     finder_prompt,
     gemini_box_to_bbox,
     keyframe_times,
-    labels_similar,
     merge_hits,
     moment_model,
     parse_json_content,
     parse_objects,
     suggest_with_jev,
+    track_window,
     Hit,
 )
 from product_placement.suggest import suggest
@@ -134,12 +132,12 @@ def test_prompt_asks_for_existing_objects_and_a_gemini_box():
         rules=BrandRules(prefer=["cups", "tables"], avoid=["beds"], placement="resting"),
     )
     text = finder_prompt([0.15, 1.0], brand)
-    assert "EXISTING visible objects" in text
+    assert "EXISTING physical objects" in text
     assert "could swap" in text
-    assert "Never mark an empty surface" in text
+    assert "never empty surfaces" in text
     assert "box_2d" in text
     assert "[ymin, xmin, ymax, xmax]" in text
-    assert "0 to 1000" in text
+    assert "0-1000" in text
     assert "visibility" in text
     assert "swap_with" in text
     assert '"objects"' in text
@@ -156,11 +154,9 @@ def test_prompt_asks_for_existing_objects_and_a_gemini_box():
     assert "Prefer:" not in bare
 
 
-def test_labels_similar_matches_a_shorter_name_for_the_same_object():
-    assert labels_similar("green wine bottle", "wine bottle")
-    assert labels_similar("black phone", "phone")
-    assert not labels_similar("wine bottle", "water bottle")
-    assert not labels_similar("phone", "laptop")
+def _xyxy(box: list[int]) -> BBox:
+    x1, y1, x2, y2 = box
+    return BBox(x1, y1, x2 - x1, y2 - y1)
 
 
 def test_parse_objects_skips_empty_surfaces_and_bad_boxes():
@@ -184,49 +180,153 @@ def test_parse_objects_skips_empty_surfaces_and_bad_boxes():
         parse_objects({"moments": []}, [(10, 10)])
 
 
-def test_merge_keeps_one_object_per_shot_and_drops_a_weak_single_sighting():
-    bottle = BBox(100, 80, 40, 60)
-    shifted = BBox(104, 84, 40, 58)
-    other = BBox(400, 200, 30, 30)
-    hits = [
-        _hit(time_s=2.0, visibility=0.92, box=bottle, key=1, label="green wine bottle"),
-        _hit(time_s=3.5, visibility=0.7, box=shifted, key=2, label="wine bottle"),
-        _hit(time_s=6.0, visibility=0.2, box=other, key=3, label="coffee mug", category="cup"),
+def test_suits_tracks_use_category_overlap_and_shot_midpoints():
+    """Timing and merge from the validated Suits clip (wine bottle spans 2.0–4.0s)."""
+    shot2 = (2.002, 3.962)
+    frames2 = [2.152, 2.982, 3.812]
+    bottle_boxes = (
+        (2.152, [1048, 435, 1137, 807], "green wine bottle"),
+        (2.982, [1046, 435, 1142, 849], "wine bottle"),
+        (3.812, [1046, 436, 1137, 823], "green wine bottle"),
+    )
+    glass_a = (
+        (2.152, [818, 563, 952, 924]),
+        (2.982, [820, 563, 954, 924]),
+        (3.812, [818, 563, 954, 921]),
+    )
+    glass_b = (
+        (2.152, [1073, 548, 1204, 885]),
+        (2.982, [1071, 548, 1202, 889]),
+        (3.812, [1071, 548, 1202, 883]),
+    )
+    plate = [557, 723, 929, 851]
+    steak = [600, 750, 800, 820]
+    hits: list[Hit] = []
+    key = 0
+    for t, box, label in bottle_boxes:
+        hits.append(
+            _hit(
+                shot_i=1,
+                time_s=t,
+                label=label,
+                category="bottle",
+                visibility=0.85,
+                box=_xyxy(box),
+                key=key,
+                swap_with="branded wine bottle",
+            )
+        )
+        key += 1
+    for t, box in glass_a:
+        hits.append(
+            _hit(
+                shot_i=1,
+                time_s=t,
+                label="wine glass with red wine",
+                category="wine_glass",
+                visibility=0.8,
+                box=_xyxy(box),
+                key=key,
+                swap_with="branded wine glass",
+            )
+        )
+        key += 1
+    for t, box in glass_b:
+        hits.append(
+            _hit(
+                shot_i=1,
+                time_s=t,
+                label="red wine glass",
+                category="wine_glass",
+                visibility=0.75,
+                box=_xyxy(box),
+                key=key,
+            )
+        )
+        key += 1
+    hits.append(
         _hit(
-            time_s=2.2,
-            visibility=0.8,
-            box=bottle,
-            key=4,
-            label="black phone",
-            category="phone",
-            swap_with="branded phone",
-        ),
-        _hit(shot_i=1, time_s=8.0, visibility=0.4, box=bottle, key=5, label="green wine bottle"),
-    ]
-    tracks = merge_hits(hits, [(0.0, 6.0), (6.0, 10.0)])
-    assert {track.label for track in tracks} == {"green wine bottle", "black phone"}
-    bottle_track = next(track for track in tracks if track.shot_i == 0 and "bottle" in track.label)
-    assert bottle_track.shot_i == 0
-    assert bottle_track.sightings == 2
-    assert bottle_track.start_s == pytest.approx(2.0)
-    assert bottle_track.end_s == pytest.approx(3.5)
-    assert bottle_track.box.as_dict() == bottle.as_dict()
-    assert bottle_track.frame_key == 1
-    assert bottle_track.visibility == pytest.approx((0.92 + 0.7) / 2)
-    phone = next(track for track in tracks if track.label == "black phone")
-    assert phone.sightings == 1
-    assert phone.start_s == pytest.approx(2.2)
-    assert phone.end_s == pytest.approx(2.2 + MIN_SPAN_S)
-    assert phone.visibility >= VISIBILITY_MIN
-    later = [track for track in tracks if track.shot_i == 1]
-    assert len(later) == 1
-    assert later[0].start_s == pytest.approx(8.0)
+            shot_i=1,
+            time_s=2.152,
+            label="plate with steak",
+            category="plate",
+            visibility=0.7,
+            box=_xyxy(plate),
+            key=key,
+        )
+    )
+    key += 1
+    hits.append(
+        _hit(
+            shot_i=1,
+            time_s=2.152,
+            label="steak",
+            category="food",
+            visibility=0.9,
+            box=_xyxy(steak),
+            key=key,
+        )
+    )
+    key += 1
+    hits.append(
+        _hit(
+            shot_i=1,
+            time_s=2.982,
+            label="wristwatch",
+            category="other",
+            visibility=0.45,
+            box=_xyxy([770, 455, 839, 516]),
+            key=key,
+            swap_with="luxury watch",
+        )
+    )
+    key += 1
+    hits.append(
+        _hit(
+            shot_i=1,
+            time_s=2.152,
+            label="waiter bill folder",
+            category="other",
+            visibility=0.25,
+            box=_xyxy([1450, 359, 1605, 604]),
+            key=key,
+        )
+    )
+    tracks = merge_hits(hits, [(0.0, 2.002), shot2], [[0.15, 1.001, 1.852], frames2])
+    by_label = {track.label: track for track in tracks}
+    assert "waiter bill folder" not in by_label
+    assert "steak" not in by_label
+    bottle = by_label["green wine bottle"]
+    assert bottle.sightings == 3
+    assert bottle.category == "bottle"
+    assert bottle.start_s == pytest.approx(2.002)
+    assert bottle.end_s == pytest.approx(3.962)
+    assert bottle.visibility == pytest.approx(0.85)
+    assert bottle.box.as_dict() == _xyxy(bottle_boxes[0][1]).as_dict()
+    assert bottle.frame_key == 0
+    assert by_label["wine glass with red wine"].start_s == pytest.approx(2.002)
+    assert by_label["red wine glass"].start_s == pytest.approx(2.002)
+    assert by_label["wine glass with red wine"].end_s == pytest.approx(3.962)
+    assert by_label["red wine glass"].end_s == pytest.approx(3.962)
+    watch = by_label["wristwatch"]
+    assert watch.sightings == 1
+    assert watch.visibility >= VISIBILITY_MIN
+    assert watch.start_s == pytest.approx(2.567)
+    assert watch.end_s == pytest.approx(3.397)
+    plate_track = by_label["plate with steak"]
+    assert plate_track.category == "plate"
+    assert plate_track.sightings == 1
 
 
-def test_track_window_clamps_to_the_shot():
-    assert clamp_track_window([1.0, 4.0], 2.0, 3.0) == (2.0, 3.0)
-    assert clamp_track_window([0.2], 0.0, 2.0) == (0.2, 0.2 + MIN_SPAN_S)
-    assert clamp_track_window([1.95], 0.0, 2.0) == (2.0 - MIN_SPAN_S, 2.0)
+def test_track_window_uses_shot_edges_and_midpoints():
+    frames = [2.152, 2.982, 3.812]
+    assert track_window([2.152, 3.812], frames, 2.002, 3.962) == (2.002, 3.962)
+    assert track_window([2.982], frames, 2.002, 3.962) == (2.567, 3.397)
+    assert track_window([1.852], [0.15, 1.001, 1.852], 0.0, 2.002) == (1.426, 2.002)
+    assert track_window([4.112], [4.112, 5.262, 6.411], 3.962, 10.01) == (
+        3.962,
+        round((4.112 + 5.262) / 2, 3),
+    )
 
 
 def test_moment_model_env(monkeypatch):
@@ -504,7 +604,7 @@ def test_suggest_with_jev_mocked_end_to_end(tmp_path, monkeypatch, capsys):
         assert body["reasoning"] == {"effort": "low"}
         assert body["response_format"]["type"] == "json_object"
         prompt = body["messages"][0]["content"][0]["text"]
-        assert "EXISTING visible objects" in prompt
+        assert "EXISTING physical objects" in prompt
         assert "contact sheet" not in prompt.lower()
         assert "Product category: Soda can" in prompt
         assert "Avoid: beds" in prompt
@@ -522,11 +622,15 @@ def test_suggest_with_jev_mocked_end_to_end(tmp_path, monkeypatch, capsys):
     assert "swap with branded wine bottle" in bottle.reason
     assert bottle.region.as_dict() == gemini_box_to_bbox(bottle_box, 640, 360).as_dict()
     assert phone.region.as_dict() == gemini_box_to_bbox(phone_box, 640, 360).as_dict()
-    phone_window = clamp_track_window([phone_time], shots[1].start_s, shots[1].end_s)
-    bottle_window = clamp_track_window(bottle_times, shots[2].start_s, shots[2].end_s)
+    phone_window = track_window(
+        [phone_time], sampled[1], shots[1].start_s, shots[1].end_s
+    )
+    bottle_window = track_window(
+        bottle_times, sampled[2], shots[2].start_s, shots[2].end_s
+    )
     assert (phone.start_s, phone.end_s) == pytest.approx(phone_window)
     assert (bottle.start_s, bottle.end_s) == pytest.approx(bottle_window)
-    assert bottle.end_s > bottle.start_s + MIN_SPAN_S
+    assert bottle.end_s > bottle.start_s
 
     bounds = [(shot.start_s, shot.end_s) for shot in shots]
     assert len(bounds) == 3
