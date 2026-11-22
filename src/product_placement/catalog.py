@@ -47,21 +47,19 @@ ATTRIBUTION_BLENDER = "CC-BY Blender Foundation"
 
 
 def _configure_catalog_logging() -> None:
-    """Send catalog logs to stdout so Railway/docker captures them."""
-    root = logging.getLogger()
-    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
-        logging.basicConfig(
-            level=logging.INFO,
-            format="[catalog] %(levelname)s %(message)s",
-            stream=sys.stdout,
-            force=True,
-        )
+    """Send catalog logs to stderr so CLI JSON on stdout stays parseable."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[catalog] %(levelname)s %(message)s",
+        stream=sys.stderr,
+        force=True,
+    )
     log.setLevel(logging.INFO)
 
 
 def seed_log(msg: str, *args: Any) -> None:
     text = msg % args if args else msg
-    print(f"[catalog-seed] {text}", flush=True)
+    print(f"[catalog-seed] {text}", file=sys.stderr, flush=True)
     log.info("%s", text)
 
 
