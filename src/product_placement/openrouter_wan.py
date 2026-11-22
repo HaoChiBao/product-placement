@@ -26,6 +26,8 @@ WAN_720P_USD_PER_10S = 1.2
 DEFAULT_POLL_TIMEOUT_S = 2700.0
 DEFAULT_POLL_INTERVAL_S = 15.0
 TERMINAL_FAILURE = frozenset({"failed", "cancelled", "expired"})
+# One blip during an ~8 minute render must not abandon a job that is still running.
+_RETRY_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 _ASPECTS = ("16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "3:2", "2:3")
 _FRAME_METHODS = frozenset({"higgsfield", "frame", "seedance", "segment"})
 
@@ -288,7 +290,11 @@ def poll_video_job(
     clock: Callable[[], float] = time.monotonic,
     on_status: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """GET /videos/{id} until completed, or failed/cancelled/expired, or timeout."""
+    """GET /videos/{id} until completed, or failed/cancelled/expired, or timeout.
+
+    A dropped connection or a 408/429/5xx is retried until the deadline. The
+    provider job keeps running, so one blip must not fail the placement.
+    """
     deadline = clock() + float(timeout_s)
     url = f"{VIDEOS_URL}/{job_id}"
     headers = _auth_headers(key)
@@ -297,10 +303,12 @@ def poll_video_job(
             raise TimeoutError(f"openrouter video job {job_id} timed out")
         try:
             response = client.get(url, headers=headers)
-        except Exception as exc:
-            raise RuntimeError(
-                f"openrouter video poll failed: {type(exc).__name__}"
-            ) from None
+        except (httpx.HTTPError, OSError, TimeoutError):
+            sleep(interval_s)
+            continue
+        if response.status_code in _RETRY_STATUS:
+            sleep(interval_s)
+            continue
         if response.status_code >= 400:
             raise RuntimeError(
                 f"openrouter video poll failed ({response.status_code}): "

@@ -4,7 +4,6 @@ import { NextRequest, NextResponse } from "next/server"
 
 import { resolveSwapMethod } from "@/lib/generation"
 import {
-  MAX_SWAP_INPUT_S,
   estimateSwapCostUsd,
   estimateWanSwapCostUsd,
   newRunId,
@@ -63,12 +62,6 @@ export async function POST(req: NextRequest) {
     }
 
     const duration = moment.end_s - moment.start_s
-    if ((method === "higgsfield" || mock) && duration > MAX_SWAP_INPUT_S + 1e-6) {
-      return NextResponse.json(
-        { error: `moment window ${duration.toFixed(2)}s exceeds max ${MAX_SWAP_INPUT_S}s` },
-        { status: 400 }
-      )
-    }
 
     let productPath = ""
     if (brandId) {
