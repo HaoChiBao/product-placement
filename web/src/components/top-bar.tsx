@@ -3,6 +3,7 @@
 import Link from "next/link"
 import { useEffect, useRef, useState } from "react"
 
+import { BrandMark } from "@/components/brand-mark"
 import { Toast } from "@/components/ui/empty-state"
 import { cn } from "@/lib/utils"
 import { session } from "@/lib/catalog-client"
@@ -60,14 +61,7 @@ export function TopBar({ step, nav }: { step?: Step; nav?: "videos" | "campaigns
   return (
     <header className="sticky top-0 z-20 border-b border-border bg-background/88 backdrop-blur-[10px]">
       <div className="mx-auto flex max-w-shell items-center gap-5 px-4 py-3 sm:px-6">
-        <Link
-          href="/"
-          className="flex items-center gap-2 font-display text-[19px] font-bold tracking-tight"
-          aria-label="Inset home"
-        >
-          <span className="logo-mark" />
-          Inset
-        </Link>
+        <BrandMark />
         <nav className="hidden gap-1 md:flex" aria-label="Primary">
           {(
             [
