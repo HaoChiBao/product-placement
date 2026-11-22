@@ -301,3 +301,22 @@ def test_missing_key_fails_job_without_raising(tmp_path, monkeypatch):
     st = _status(tmp_path, "job4")
     assert st["status"] == "failed"
     assert "TINYFISH_API_KEY" in st["error"]
+
+
+def test_to_brand_profile_splits_leaked_json_in_scene_lists():
+    # Real Agent output (Liquid Death run): JSON leaked into a string item.
+    garbled = {
+        **OK_RESULT,
+        "goodScenes": [
+            'Skate park hangout","Road trip adventure","Backyard BBQ with friends"],',
+            "avoidScenes:[",
+        ],
+        "avoidScenes": ["Kids' birthday party"],
+    }
+    profile = to_brand_profile(garbled, "Liquid Death", "liquiddeath.com", "Mountain Water")
+    assert profile["goodScenes"] == [
+        "Skate park hangout",
+        "Road trip adventure",
+        "Backyard BBQ with friends",
+    ]
+    assert profile["avoidScenes"] == ["Kids' birthday party"]

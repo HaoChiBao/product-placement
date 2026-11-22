@@ -320,12 +320,30 @@ def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+_LEAKED_ITEM_SEP = re.compile(r'"\s*,\s*"')
+_LEAKED_KEY = re.compile(r"^[A-Za-z_]+\s*:\s*\[?$")
+
+
+def _unleak(text: str) -> list[str]:
+    """Split one string the agent filled with leaked JSON (`a","b"],`) back into items.
+
+    Seen live: goodScenes came back as ['A","B","C"],', 'avoidScenes:['].
+    """
+    pieces = _LEAKED_ITEM_SEP.split(text)
+    out = []
+    for piece in pieces:
+        piece = piece.strip().strip('[]",').strip()
+        if piece and not _LEAKED_KEY.match(piece):
+            out.append(piece)
+    return out
+
+
 def _strings(values: Any, limit: int) -> list[str]:
     out: list[str] = []
     for v in values if isinstance(values, list) else []:
-        s = _text(v)
-        if s and s.lower() not in {x.lower() for x in out}:
-            out.append(s)
+        for s in _unleak(_text(v)):
+            if s.lower() not in {x.lower() for x in out}:
+                out.append(s)
     return out[:limit]
 
 
