@@ -297,6 +297,48 @@ def test_campaign_draft_then_live(catalog_env):
     assert live["status"] == "live"
 
 
+def test_watch_uses_clamped_clip_window(catalog_env):
+    conn, _data = catalog_env
+    title = create_title(conn, name="Clamp Film", kind="movie", slug="clamp-film")
+    vkey = catalog_video_key(title["slug"], 1, 1)
+    get_object_store().put_bytes(b"mp4", vkey, content_type="video/mp4")
+    ep = create_episode(
+        conn,
+        title_id=title["id"],
+        name="Pilot",
+        season=1,
+        episode=1,
+        video_key=vkey,
+        duration_s=40.0,
+        suggest_status="ready",
+    )
+    brand = create_brand(conn, name="Brand Z", brief="cans")
+    moment = insert_moment(
+        conn,
+        episode_id=ep["id"],
+        start_s=0.0,
+        end_s=40.0,
+        region={"x": 1, "y": 1, "w": 10, "h": 10},
+        whats_there="can",
+        score=0.5,
+    )
+    pl = upsert_placement(
+        conn, brand_id=brand["id"], moment_id=moment["id"], status="approved"
+    )
+    update_placement(
+        conn,
+        pl["id"],
+        status="ready",
+        clip_key="catalog/x/clip.mp4",
+        clip_start_s=15.0,
+        clip_end_s=25.0,
+    )
+    payload = get_watch_payload(conn, title_slug="clamp-film", season=1, episode=1)
+    hit = payload["placements"][0]
+    assert hit["start_s"] == 15.0
+    assert hit["end_s"] == 25.0
+
+
 def test_queued_with_error_can_retry_spawn(catalog_env):
     conn, data = catalog_env
     title = create_title(conn, name="Retry Film", kind="movie")

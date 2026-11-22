@@ -17,6 +17,9 @@ const HIGGSFIELD_KEY_MISSING =
 const WAN_KEY_MISSING =
   "Generation queued: OpenRouter API key missing (set OPENROUTER_API_KEY)"
 
+const S3_MISSING =
+  "Generation queued: S3 key missing (set AWS_S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY)"
+
 const FRAME_METHODS = new Set(["higgsfield", "frame", "seedance", "segment"])
 
 export function resolveSwapMethod(raw?: string | null): SwapMethod {
@@ -42,6 +45,14 @@ function openrouterKeyConfigured(): boolean {
   return Boolean((process.env.OPENROUTER_API_KEY || "").trim())
 }
 
+function s3Configured(): boolean {
+  return Boolean(
+    (process.env.AWS_S3_BUCKET_NAME || "").trim() &&
+      (process.env.AWS_ACCESS_KEY_ID || "").trim() &&
+      (process.env.AWS_SECRET_ACCESS_KEY || "").trim()
+  )
+}
+
 /** Resolve whether to spawn a real/mock swap or hold the placement queued. */
 export function planGeneration(opts?: {
   testMode?: boolean
@@ -49,24 +60,50 @@ export function planGeneration(opts?: {
 }): GenerationPlan {
   const method = resolveSwapMethod(opts?.method)
   const mock = mockEnvOn()
-  const keys = method === "higgsfield" ? higgsfieldKeysConfigured() : openrouterKeyConfigured()
   const explicitTest = opts?.testMode === true
   const explicitPaid = opts?.testMode === false
+  const hfKeys = higgsfieldKeysConfigured()
+  const orKey = openrouterKeyConfigured()
+  const s3 = s3Configured()
+  const keys = method === "higgsfield" ? hfKeys : orKey && s3
 
   if (explicitTest || (mock && !explicitPaid)) {
     return { testMode: true, canSpawn: true, mockEnv: mock, keysConfigured: keys, method }
   }
-  if (keys) {
-    return { testMode: false, canSpawn: true, mockEnv: mock, keysConfigured: keys, method }
+  if (method === "higgsfield") {
+    if (hfKeys) {
+      return { testMode: false, canSpawn: true, mockEnv: mock, keysConfigured: true, method }
+    }
+    return {
+      testMode: false,
+      canSpawn: false,
+      mockEnv: mock,
+      keysConfigured: false,
+      method,
+      holdError: HIGGSFIELD_KEY_MISSING,
+    }
   }
-  return {
-    testMode: false,
-    canSpawn: false,
-    mockEnv: mock,
-    keysConfigured: keys,
-    method,
-    holdError: method === "higgsfield" ? HIGGSFIELD_KEY_MISSING : WAN_KEY_MISSING,
+  if (!orKey) {
+    return {
+      testMode: false,
+      canSpawn: false,
+      mockEnv: mock,
+      keysConfigured: false,
+      method,
+      holdError: WAN_KEY_MISSING,
+    }
   }
+  if (!s3) {
+    return {
+      testMode: false,
+      canSpawn: false,
+      mockEnv: mock,
+      keysConfigured: false,
+      method,
+      holdError: S3_MISSING,
+    }
+  }
+  return { testMode: false, canSpawn: true, mockEnv: mock, keysConfigured: true, method }
 }
 
 export function generationHealth() {
