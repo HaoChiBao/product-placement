@@ -17,8 +17,12 @@ from product_placement.product_image import (
     decode_image,
     download_image,
     is_shopify,
+    collect_retailer_candidates,
+    is_multipack,
+    is_retailer,
     largest_variant,
     product_page_links,
+    retailer_pages,
     parse_shopify_json,
     rank,
     rank_image_links,
@@ -387,3 +391,213 @@ def test_collect_candidates_reads_linked_product_pages():
     cands = collect_candidates(fetch, site="https://brand.test", product="Zero can", agent_url=None, product_url=None)
     assert calls == [["https://brand.test"], ["https://brand.test/products/zero-can"]]
     assert [c.url for c in cands] == ["https://brand.test/img/zero-can-front.png"]
+
+
+# ------------------------------------------------------------------ retailer fallback
+
+
+def test_retailer_allowlist_skips_lookalikes_resellers_and_the_brand():
+    assert is_retailer("https://www.walmart.com/ip/Pepsi/13424347")
+    assert is_retailer("https://target.com/p/pepsi/-/A-1")
+    assert not is_retailer("https://allbirdshop.co/product/mens-tree-runners")  # lookalike store
+    assert not is_retailer("https://www.ebay.com/b/pepsi-bottle/bn_1")  # reseller photos
+    assert not is_retailer("https://notwalmart.com/ip/1")
+    assert not is_retailer("https://www.target.com/p/x", brand_site="https://target.com")
+    results = [
+        {"url": "https://www.pepsi.com/"},
+        {"url": "https://www.walmart.com/ip/a/1"},
+        {"url": "https://www.walmart.com/ip/b/2"},
+        {"url": "https://www.ebay.com/b/pepsi"},
+        {"url": "https://target.com/p/c/-/A-3"},
+    ]
+    assert retailer_pages(results, "https://pepsi.com") == [
+        "https://www.walmart.com/ip/a/1",
+        "https://target.com/p/c/-/A-3",
+    ]
+
+
+def test_largest_variant_for_retailer_cdns():
+    url, _, _ = largest_variant(
+        "https://i5.walmartimages.com/asr/ef07734e.4416f.jpeg?odnHeight=117&odnWidth=117&odnBg=FFFFFF"
+    )
+    assert url == "https://i5.walmartimages.com/asr/ef07734e.4416f.jpeg"
+    url, _, _ = largest_variant("https://m.media-amazon.com/images/I/718EEARg3rL._FMwebp__SR600,600_.jpg")
+    assert url == "https://m.media-amazon.com/images/I/718EEARg3rL.jpg"
+    a = largest_variant("https://target.scene7.com/is/image/Target/GUEST_60ff?wid=300&hei=300&qlt=80")
+    b = largest_variant("https://target.scene7.com/is/image/Target/GUEST_60ff?wid=800&hei=800&qlt=80&fmt=pjpeg")
+    assert a[0] == b[0] == "https://target.scene7.com/is/image/Target/GUEST_60ff?wid=1200&hei=1200&qlt=90"
+
+
+def test_collect_retailer_candidates_uses_job_search_then_shopping_search():
+    searches: list[str] = []
+    fetched: list[list[str]] = []
+
+    def search(q):
+        searches.append(q)
+        return {"results": [{"url": "https://www.target.com/p/pepsi/-/A-1"}]}
+
+    def fetch(urls, **kw):
+        fetched.append(urls)
+        return {
+            "results": [
+                {
+                    "final_url": u,
+                    "image_links": [
+                        "https://cdn.test/site-banner.png",
+                        "https://cdn.test/Pepsi-Cola-2L-Bottle.jpeg",
+                        "https://cdn.test/other.jpeg",
+                    ],
+                }
+                for u in urls
+            ]
+        }
+
+    cands = collect_retailer_candidates(
+        fetch,
+        search,
+        business="Pepsi",
+        product="Pepsi bottle",
+        site="https://pepsi.ca",
+        seed_results=[{"url": "https://www.walmart.com/ip/Pepsi/1"}, {"url": "https://www.pepsi.ca"}],
+    )
+    assert searches == ["Pepsi Pepsi bottle buy"]
+    assert fetched == [["https://www.walmart.com/ip/Pepsi/1", "https://www.target.com/p/pepsi/-/A-1"]]
+    # Only the image named after the product, from each listing.
+    assert [c.url for c in cands] == ["https://cdn.test/Pepsi-Cola-2L-Bottle.jpeg"] * 2
+    assert {c.host for c in cands} == {"walmart.com", "target.com"}
+    assert all(c.source == "retailer" and c.referer.startswith("https://") for c in cands)
+
+
+def test_retailers_only_when_brand_site_comes_up_short(tmp_path: Path):
+    body = png_bytes(packshot())
+    other = png_bytes(packshot(900, 900, bg=250))
+
+    class NoClip:
+        available = False
+
+    def run(brand_images: list[str]) -> tuple[list[dict], list[str]]:
+        searches: list[str] = []
+
+        def fetch(urls, **kw):
+            if urls[0].startswith("https://www.walmart.com"):
+                return {"results": [{"final_url": urls[0], "image_links": ["https://cdn.test/walmart.png"]}]}
+            return {"results": [{"final_url": "https://brand.test", "image_links": brand_images}]}
+
+        routes = {
+            f"https://cdn.test/{n}.png": httpx.Response(200, headers={"content-type": "image/png"}, content=c)
+            for n, c in [("a", body), ("walmart", other)]
+        }
+        for i, n in enumerate(["b", "c"]):
+            img = packshot()
+            img[0, 0] = (i, i, i)  # distinct bytes
+            routes[f"https://cdn.test/{n}.png"] = httpx.Response(
+                200, headers={"content-type": "image/png"}, content=png_bytes(img)
+            )
+        entries = source_product_images(
+            tmp_path,
+            fetch=fetch,
+            site="https://brand.test",
+            product="Zero",
+            http=client(routes),
+            clip=NoClip(),
+            business="Brand",
+            search=lambda q: searches.append(q) or {"results": []},
+            search_results=[{"url": "https://www.walmart.com/ip/zero/1"}],
+        )
+        return entries, searches
+
+    full, searches = run(["https://cdn.test/a.png", "https://cdn.test/b.png", "https://cdn.test/c.png"])
+    assert [e["source"] for e in full] == ["img", "img", "img"] and searches == []
+
+    short, _ = run(["https://cdn.test/a.png"])
+    assert [e["source"] for e in short] == ["img", "retailer"]
+    assert short[1]["host"] == "walmart.com"
+
+
+def test_retailer_search_pages_tracking_and_instacart_unwrap():
+    results = [
+        {"url": "https://www.target.com/s/pepsi+bottle"},
+        {"url": "https://www.instacart.com/store/s?k=pepsi+glass+bottle"},
+        {"url": "https://www.walmart.com/ip/Pepsi-Original/13424347"},
+        {"url": "https://www.target.com/p/pepsi-cola-2-l-bottle/-/A-13044196"},
+    ]
+    assert retailer_pages(results, "https://pepsi.ca") == [
+        "https://www.walmart.com/ip/Pepsi-Original/13424347",
+        "https://www.target.com/p/pepsi-cola-2-l-bottle/-/A-13044196",
+    ]
+    assert rank_image_links(["https://www.walmart.com/akam/13/pixel_22cb4d0c?a=1"], "", "pepsi") == []
+    assert rank_image_links(["https://brand.test/coca-cola-fall-hockey-big-wins-banner-dt.png"], "", "coca-cola") == []
+    url, _, _ = largest_variant(
+        "https://www.instacart.com/image-server/197x197/filters:fill(FFFFFF,true):format(jpg)/"
+        "d2lnr5mha7bycj.cloudfront.net/product-image/file/large_f67a7679.jpeg"
+    )
+    assert url == "https://d2lnr5mha7bycj.cloudfront.net/product-image/file/large_f67a7679.jpeg"
+
+
+def test_retailer_prefers_named_images_else_page_order():
+    def links_for(url):
+        if "walmart" in url:
+            return [
+                "https://i5.walmartimages.com/dfw/4ff9c6c9/k2-_0a671c38.v1.png",
+                "https://i5.walmartimages.com/seo/Pepsi-Original-Cola-12-fl-oz-Bottles_c54b.c169.jpeg?odnHeight=640",
+                "https://i5.walmartimages.com/asr/ef07734e.4416f.jpeg?odnHeight=117",
+            ]
+        return [
+            "https://target.scene7.com/is/image/Target/GUEST_60ff?wid=800&hei=800",
+            "https://target.scene7.com/is/image/Target/GUEST_f788?wid=800&hei=800",
+            "https://target.scene7.com/is/image/Target/GUEST_aaaa?wid=800&hei=800",
+        ]
+
+    def fetch(urls, **kw):
+        return {"results": [{"final_url": u, "image_links": links_for(u)} for u in urls]}
+
+    cands = collect_retailer_candidates(
+        fetch,
+        None,
+        business="Pepsi",
+        product="Pepsi bottle",
+        site="https://pepsi.ca",
+        seed_results=[{"url": "https://www.walmart.com/ip/Pepsi/1"}, {"url": "https://www.target.com/p/pepsi/-/A-1"}],
+    )
+    walmart = [c.url for c in cands if c.host == "walmart.com"]
+    target = [c.url for c in cands if c.host == "target.com"]
+    assert walmart == ["https://i5.walmartimages.com/seo/Pepsi-Original-Cola-12-fl-oz-Bottles_c54b.c169.jpeg"]
+    assert target == [
+        "https://target.scene7.com/is/image/Target/GUEST_60ff?wid=1200&hei=1200&qlt=90",
+        "https://target.scene7.com/is/image/Target/GUEST_f788?wid=1200&hei=1200&qlt=90",
+    ]
+
+
+def test_multipack_detection_and_ranking():
+    assert is_multipack("Pepsi-Original-Cola-Soda-Pop-12-fl-oz-Bottles-8-Pack", "pepsi bottle")
+    assert is_multipack("LD-Core-StillWater_12oz_6pk_FRONT", "Mountain Water can")
+    assert is_multipack("Pack-of-2-Coca-Cola-Zero-Sugar-Soda-Bottle-2-liter", "Coca-Cola Zero Sugar 2L bottle")
+    assert is_multipack("Liquid Death Still Mountain Water, 16.9 oz Tallboys, 12 pack", "Mountain Water")
+    assert not is_multipack("product_image_pepsi_zero_0", "Pepsi Zero Sugar 355 ml can")
+    assert not is_multipack("12oz_can_front", "Mountain Water can")  # ounces aren't a pack
+    assert not is_multipack("Pepsi-12-Pack", "Pepsi 12 pack")  # the product is the pack
+
+    single = CleanImage(Candidate("single", "retailer"), np.zeros((600, 600, 4), np.uint8), True)
+    pack = CleanImage(Candidate("pack", "retailer", prior=0.05, multipack=True), np.zeros((900, 900, 4), np.uint8), True)
+    assert [im.candidate.url for im in rank([pack, single], "Pepsi", None)] == ["single", "pack"]
+    clip = StubClip({255: [0.30, 0.10, 0.10]})  # transparent pixels render white
+    assert [im.candidate.url for im in rank([pack, single], "Pepsi", clip)] == ["single", "pack"]
+
+
+def test_retailer_title_marks_multipack():
+    def fetch(urls, **kw):
+        return {"results": [{"final_url": urls[0], "title": "Pepsi Cola, 12 fl oz Bottles, 8 Pack",
+                             "image_links": ["https://cdn.test/Pepsi-Cola.jpeg"]}]}
+
+    cands = collect_retailer_candidates(
+        fetch, None, business="Pepsi", product="Pepsi bottle", site="https://pepsi.ca",
+        seed_results=[{"url": "https://www.walmart.com/ip/Pepsi/1"}],
+    )
+    assert [c.multipack for c in cands] == [True]
+
+
+def test_agent_pick_beats_a_well_named_site_image():
+    agent = CleanImage(Candidate("agent_2l_bottle", "agent", prior=0.5), np.full((600, 600, 4), (30, 30, 30, 255), np.uint8), True)
+    can = CleanImage(Candidate("coca-cola_prod_zero_sugar", "img", prior=0.35), np.full((600, 600, 4), (40, 40, 40, 255), np.uint8), True)
+    clip = StubClip({30: [0.28, 0.10, 0.10], 40: [0.30, 0.10, 0.10]})  # CLIP slightly prefers the can
+    assert [im.candidate.source for im in rank([can, agent], "Coca-Cola Zero Sugar 2L bottle", clip)] == ["agent", "img"]
