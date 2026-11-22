@@ -15,8 +15,8 @@ export default async function WatchEpisodePage({
   return (
     <Suspense
       fallback={
-        <div className="watch-play">
-          <p className="watch-tile-meta">Loading…</p>
+        <div className="px-3 pb-10 pt-3 sm:px-6 lg:px-8">
+          <p className="text-xs text-faint">Loading…</p>
         </div>
       }
     >

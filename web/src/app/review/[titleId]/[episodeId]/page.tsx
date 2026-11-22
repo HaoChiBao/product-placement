@@ -1,10 +1,13 @@
 "use client"
 
-import Link from "next/link"
 import { useParams, useRouter } from "next/navigation"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { TopBar, useToast } from "@/components/top-bar"
+import { Badge } from "@/components/ui/badge"
+import { Button, ButtonLink } from "@/components/ui/button"
+import { Panel } from "@/components/ui/card"
+import { Skeleton } from "@/components/ui/empty-state"
 import { videoLabel } from "@/components/video-thumb"
 import {
   decidePlacement,
@@ -23,6 +26,7 @@ import {
   type Placement,
   type Video,
 } from "@/lib/catalog-client"
+import { cn } from "@/lib/utils"
 
 type Status = Placement["status"] | "pending"
 
@@ -44,9 +48,23 @@ function statusLabel(st: Status, p?: Placement): string {
   return STATUS_LABEL[st]
 }
 
-const PLAY = <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M2 1l9 5-9 5z" /></svg>
+function statusBadgeVariant(st: Status): "muted" | "accent" | "warning" | "danger" {
+  if (st === "ready") return "accent"
+  if (st === "queued" || st === "rendering" || st === "approved") return "warning"
+  if (st === "rejected" || st === "failed") return "danger"
+  return "muted"
+}
+
+const PLAY = (
+  <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+    <path d="M2 1l9 5-9 5z" />
+  </svg>
+)
 const PAUSE = (
-  <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><rect x="2" y="1" width="3" height="10" /><rect x="7" y="1" width="3" height="10" /></svg>
+  <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor">
+    <rect x="2" y="1" width="3" height="10" />
+    <rect x="7" y="1" width="3" height="10" />
+  </svg>
 )
 
 export default function ReviewPage() {
@@ -109,7 +127,6 @@ export default function ReviewPage() {
   const episodeSrc = mediaUrl(video?.video_key)
   const dur = video?.duration_s || Math.max(1, ...list.map((x) => x.end_s))
 
-  // Point the stage at the selected moment.
   useEffect(() => {
     setPlaying(false)
     if (m) setT(m.start_s)
@@ -148,7 +165,10 @@ export default function ReviewPage() {
     if ((e.target as HTMLElement).closest(".ap-mk")) return
     const r = e.currentTarget.getBoundingClientRect()
     const at = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * dur
-    const nearest = list.reduce((best, x, i) => (Math.abs(x.start_s - at) < Math.abs(list[best].start_s - at) ? i : best), 0)
+    const nearest = list.reduce(
+      (best, x, i) => (Math.abs(x.start_s - at) < Math.abs(list[best].start_s - at) ? i : best),
+      0
+    )
     setCur(nearest)
   }
 
@@ -208,16 +228,20 @@ export default function ReviewPage() {
       <TopBar step="review" />
       <main className="ap">
         <section className="ap-main">
-          <div className="ap-bar">
-            <Link className="sbtn" href="/videos">← Videos</Link>
-            <div style={{ minWidth: 0 }}>
-              <b style={{ fontWeight: 600 }}>{video ? videoLabel(video) : "Loading…"}</b>
-              <div className="ap-sub mono">
+          <div className="flex flex-wrap items-center gap-3.5 border-b border-stage-line px-4 py-2.5">
+            <ButtonLink href="/videos" variant="stage" size="sm">
+              ← Videos
+            </ButtonLink>
+            <div className="min-w-0">
+              <b className="font-semibold">{video ? videoLabel(video) : "Loading…"}</b>
+              <div className="font-mono text-[11.5px] tabular-nums text-stage-muted">
                 {list.length} spot{list.length === 1 ? "" : "s"} · {fmt(dur, false)}
               </div>
             </div>
-            <span className="sp" />
-            <button className="sbtn" onClick={saveDraft}>Save to drafts</button>
+            <span className="flex-1" />
+            <Button variant="stage" size="sm" onClick={saveDraft}>
+              Save to drafts
+            </Button>
           </div>
 
           <div className="stage-wrap">
@@ -233,7 +257,14 @@ export default function ReviewPage() {
                   onPause={() => setPlaying(false)}
                 />
               ) : episodeSrc && !holding ? (
-                <video key={episodeSrc} ref={vidRef} src={episodeSrc} playsInline preload="metadata" onTimeUpdate={onTime} />
+                <video
+                  key={episodeSrc}
+                  ref={vidRef}
+                  src={episodeSrc}
+                  playsInline
+                  preload="metadata"
+                  onTimeUpdate={onTime}
+                />
               ) : frame ? (
                 <img src={frame} alt="" />
               ) : null}
@@ -245,16 +276,21 @@ export default function ReviewPage() {
               ) : null}
 
               {m && !showClip && !holding && st !== "pending" ? (
-                <div className="stage-msg">
+                <div className="absolute inset-0 grid place-items-center bg-black/45">
                   {IN_FLIGHT.includes(st) ? (
                     <>
                       <div className="scan" />
-                      <div><span className="spinner" />Placing your product in this moment…</div>
+                      <div className="relative flex items-center gap-2.5 rounded-[10px] bg-black/75 px-4 py-3 text-[13px] text-white">
+                        <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                        Placing your product in this moment…
+                      </div>
                     </>
                   ) : st === "rejected" ? (
-                    <div>Rejected · original kept</div>
+                    <div className="rounded-[10px] bg-black/75 px-4 py-3 text-[13px] text-white">
+                      Rejected · original kept
+                    </div>
                   ) : st === "failed" ? (
-                    <div>
+                    <div className="rounded-[10px] bg-black/75 px-4 py-3 text-[13px] text-white">
                       {/no product asset/i.test(placements[m.id]?.error || "")
                         ? "No product image on file. Upload one to generate this placement."
                         : `Generation failed${placements[m.id]?.error ? `: ${placements[m.id]?.error}` : ""}`}
@@ -264,13 +300,16 @@ export default function ReviewPage() {
               ) : null}
 
               {m ? (
-                <span className="stage-tag">
-                  {showClip ? `Post-processed · ${m.whats_there}` : `${m.whats_there || "spot"} · ${fmt(m.start_s)}`}
+                <span className="absolute bottom-2.5 left-2.5 rounded px-[7px] py-[5px] font-mono text-[11px] font-medium text-white bg-black/65">
+                  {showClip
+                    ? `Post-processed · ${m.whats_there}`
+                    : `${m.whats_there || "spot"} · ${fmt(m.start_s)}`}
                 </span>
               ) : null}
               {clip ? (
                 <button
-                  className="ap-hold"
+                  type="button"
+                  className="absolute bottom-2.5 right-2.5 select-none rounded-[5px] border-0 bg-black/65 px-[9px] py-1.5 text-[11px] font-medium text-white"
                   onMouseDown={() => setHolding(true)}
                   onMouseUp={() => setHolding(false)}
                   onMouseLeave={() => setHolding(false)}
@@ -283,31 +322,56 @@ export default function ReviewPage() {
             </div>
           </div>
 
-          <div className="ap-tbar">
-            <div className="ap-ctrl">
-              <button className="play" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"} disabled={!m}>
+          <div className="flex flex-col gap-3 border-t border-stage-line px-4 pb-[18px] pt-2.5">
+            <div className="flex flex-wrap items-center gap-2.5 text-[12.5px]">
+              <button
+                type="button"
+                className="grid size-[30px] place-items-center rounded-full border-0 bg-stage-ink text-stage disabled:opacity-40"
+                onClick={togglePlay}
+                aria-label={playing ? "Pause" : "Play"}
+                disabled={!m}
+              >
                 {playing ? PAUSE : PLAY}
               </button>
-              <button className="sbtn" onClick={() => setCur((c) => Math.max(0, c - 1))} disabled={cur === 0}>‹ Prev</button>
-              <button className="sbtn" onClick={() => setCur((c) => Math.min(list.length - 1, c + 1))} disabled={cur >= list.length - 1}>
+              <Button
+                variant="stage"
+                size="sm"
+                onClick={() => setCur((c) => Math.max(0, c - 1))}
+                disabled={cur === 0}
+              >
+                ‹ Prev
+              </Button>
+              <Button
+                variant="stage"
+                size="sm"
+                onClick={() => setCur((c) => Math.min(list.length - 1, c + 1))}
+                disabled={cur >= list.length - 1}
+              >
                 Next ›
-              </button>
-              <span className="mono tc">{fmt(t)}</span>
-              <span className="mono" style={{ color: "var(--stage-muted)" }}>/ {fmt(dur)}</span>
-              <span style={{ flex: 1 }} />
-              <span className="ap-legend">
-                <i style={{ background: "var(--stage-muted)" }} />Pending
-                <i style={{ background: "#e6a24a" }} />Generating
-                <i style={{ background: "var(--key)" }} />Ready
-                <i style={{ background: "#e5484d" }} />Rejected
+              </Button>
+              <span className="font-mono tabular-nums text-stage-ink">{fmt(t)}</span>
+              <span className="font-mono tabular-nums text-stage-muted">/ {fmt(dur)}</span>
+              <span className="flex-1" />
+              <span className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-stage-muted">
+                <i className="ml-2 size-2 rounded-sm bg-stage-muted not-italic" />
+                Pending
+                <i className="ml-2 size-2 rounded-sm bg-[#e6a24a] not-italic" />
+                Generating
+                <i className="ml-2 size-2 rounded-sm bg-accent not-italic" />
+                Ready
+                <i className="ml-2 size-2 rounded-sm bg-[#e5484d] not-italic" />
+                Rejected
               </span>
             </div>
             <div className="ap-time" onClick={seekBar}>
-              <div className="ap-rail"><div className="ap-done" style={{ width: `${(t / dur) * 100}%` }} /></div>
+              <div className="ap-rail">
+                <div className="ap-done" style={{ width: `${(t / dur) * 100}%` }} />
+              </div>
               {list.map((x, i) => (
                 <button
                   key={x.id}
-                  className={`ap-mk ${i === cur ? "cur" : ""}`}
+                  type="button"
+                  className={cn("ap-mk", i === cur && "cur")}
                   data-st={statusOf(x)}
                   style={{ left: `${(x.start_s / dur) * 100}%`, width: `${Math.max(14, 0)}px` }}
                   onClick={() => setCur(i)}
@@ -319,46 +383,65 @@ export default function ReviewPage() {
               <div className="ap-head" style={{ left: `${(t / dur) * 100}%` }} />
               <div className="ap-ticks">
                 {Array.from({ length: 7 }, (_, i) => (
-                  <span key={i} style={{ left: `${Math.min(97, Math.max(3, (i / 6) * 100))}%` }}>{fmt((dur * i) / 6, false)}</span>
+                  <span
+                    key={i}
+                    style={{ left: `${Math.min(97, Math.max(3, (i / 6) * 100))}%` }}
+                  >
+                    {fmt((dur * i) / 6, false)}
+                  </span>
                 ))}
               </div>
             </div>
           </div>
         </section>
 
-        <aside className="ap-side">
-          <div className="ap-side-h">
+        <aside className="flex min-h-0 flex-col border-l border-border bg-background max-[1080px]:min-h-[520px] max-[1080px]:border-l-0 max-[1080px]:border-t">
+          <div className="flex items-end justify-between gap-2.5 border-b border-border p-4">
             <div>
               <div className="eyebrow">Review</div>
-              <h2 style={{ marginTop: 2 }}>Approve each placement</h2>
+              <h2 className="mt-0.5">Approve each placement</h2>
             </div>
-            <button className="btn btn-sm" onClick={approveAll} disabled={!counts.pending || Boolean(busy)}>Approve all</button>
+            <Button
+              size="sm"
+              onClick={approveAll}
+              disabled={!counts.pending || Boolean(busy)}
+            >
+              Approve all
+            </Button>
           </div>
-          <div className="ap-list">
+
+          <div className="flex flex-1 flex-col gap-2.5 overflow-y-auto p-3">
             {!hasAsset ? (
-              <div className="panel" style={{ padding: 12, fontSize: 13, display: "flex", flexDirection: "column", gap: 8 }}>
-                <b style={{ fontWeight: 600 }}>Add a product image to generate placements</b>
-                <span className="muted">We need a picture of your product to place it in the video.</span>
-                <Link className="btn btn-sm" href="/" style={{ alignSelf: "flex-start" }}>Upload product image</Link>
-              </div>
+              <Panel className="flex flex-col gap-2 p-3 text-[13px]">
+                <b className="font-semibold">Add a product image to generate placements</b>
+                <span className="text-muted-foreground">
+                  We need a picture of your product to place it in the video.
+                </span>
+                <ButtonLink href="/" size="sm" className="self-start">
+                  Upload product image
+                </ButtonLink>
+              </Panel>
             ) : null}
-            {error ? <p className="error">{error}</p> : null}
+            {error ? <p className="text-[13px] text-destructive">{error}</p> : null}
             {moments === null && !error
               ? Array.from({ length: 3 }, (_, i) => (
-                  <div key={i} className="ed-it">
-                    <div className="ed-top">
-                      <div className="thumb" />
-                      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 6 }}>
-                        <div className="sk" style={{ width: "80%" }} />
-                        <div className="sk" style={{ width: "50%" }} />
+                  <div
+                    key={i}
+                    className="flex flex-col gap-2.5 rounded-md border-[1.5px] border-border bg-card p-2.5"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <div className="thumb w-24 shrink-0" />
+                      <div className="flex flex-1 flex-col gap-1.5">
+                        <Skeleton className="w-[80%]" />
+                        <Skeleton className="w-1/2" />
                       </div>
                     </div>
                   </div>
                 ))
               : null}
             {moments && !list.length ? (
-              <p className="muted">
-                {(video && isScanned(video))
+              <p className="text-muted-foreground">
+                {video && isScanned(video)
                   ? "No spots in this video fit your brand."
                   : "Still scanning this video for placement spots. This page updates on its own."}
               </p>
@@ -368,27 +451,54 @@ export default function ReviewPage() {
               const f = mediaUrl(x.frame_key)
               const r = regionPct(x)
               return (
-                <div key={x.id} className={`ed-it ${i === cur ? "cur" : ""}`} data-st={s}>
-                  <button className="ed-top" onClick={() => setCur(i)}>
-                    <div className="thumb">
+                <div
+                  key={x.id}
+                  data-st={s}
+                  className={cn(
+                    "flex flex-col gap-2.5 rounded-md border-[1.5px] border-border bg-card p-2.5 text-left",
+                    i === cur && "border-foreground",
+                    s === "ready" && "border-accent",
+                    (s === "rejected" || s === "failed") && "border-destructive"
+                  )}
+                >
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2.5 border-0 bg-transparent p-0 text-left"
+                    onClick={() => setCur(i)}
+                  >
+                    <div className="thumb w-24 shrink-0 !rounded-sm">
                       {f ? <img src={f} alt="" /> : <div className="thumb-ph" />}
                       {r ? <div className="det" style={r} /> : null}
                     </div>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <b style={{ textTransform: "capitalize" }}>{i + 1}. {x.whats_there || "Spot"}</b>
-                      <small>{fmt(x.start_s)} – {fmt(x.end_s)}</small>
+                    <div className="min-w-0 flex-1">
+                      <b className="block text-[13px] font-semibold capitalize">
+                        {i + 1}. {x.whats_there || "Spot"}
+                      </b>
+                      <small className="font-mono text-[11.5px] leading-[1.4] text-muted-foreground">
+                        {fmt(x.start_s)} – {fmt(x.end_s)}
+                      </small>
                     </div>
-                    <span className="st-pill" data-st={s}>{statusLabel(s, placements[x.id])}</span>
+                    <Badge variant={statusBadgeVariant(s)} className="ml-auto shrink-0">
+                      {statusLabel(s, placements[x.id])}
+                    </Badge>
                   </button>
                   {placements[x.id]?.error ? (
-                    <p className="note" style={{ margin: "0 0 6px", gridColumn: "1 / -1" }}>
+                    <p className="m-0 text-xs leading-[1.45] text-muted-foreground">
                       {placements[x.id].error}
                     </p>
                   ) : null}
-                  <div className="ed-act">
+                  <div className="flex gap-2">
                     <button
-                      className="ok"
-                      aria-pressed={s === "ready" || (IN_FLIGHT.includes(s) && !placements[x.id]?.error)}
+                      type="button"
+                      className={cn(
+                        "flex-1 rounded-sm border border-border bg-card px-2 py-[7px] text-[12.5px] font-medium disabled:cursor-not-allowed disabled:opacity-50",
+                        (s === "ready" ||
+                          (IN_FLIGHT.includes(s) && !placements[x.id]?.error)) &&
+                          "border-accent bg-accent text-white"
+                      )}
+                      aria-pressed={
+                        s === "ready" || (IN_FLIGHT.includes(s) && !placements[x.id]?.error)
+                      }
                       disabled={
                         busy === x.id ||
                         s === "ready" ||
@@ -399,7 +509,11 @@ export default function ReviewPage() {
                       ✓ {s === "failed" || placements[x.id]?.error ? "Retry" : "Approve"}
                     </button>
                     <button
-                      className="no"
+                      type="button"
+                      className={cn(
+                        "flex-1 rounded-sm border border-border bg-card px-2 py-[7px] text-[12.5px] font-medium disabled:cursor-not-allowed disabled:opacity-50",
+                        s === "rejected" && "border-destructive bg-destructive text-white"
+                      )}
                       aria-pressed={s === "rejected"}
                       disabled={busy === x.id || s === "rejected"}
                       onClick={() => decide(x, "rejected")}
@@ -411,22 +525,28 @@ export default function ReviewPage() {
               )
             })}
           </div>
-          <div className="ap-foot">
-            <div className="sum-row">
+
+          <div className="flex flex-col gap-2.5 border-t border-border px-4 py-3.5">
+            <div className="flex justify-between gap-3 text-[13px]">
               <span>
-                {counts.ready} ready · {counts.flight} generating · {counts.rejected} rejected · {counts.pending} pending
+                {counts.ready} ready · {counts.flight} generating · {counts.rejected} rejected ·{" "}
+                {counts.pending} pending
               </span>
             </div>
-            <Link
-              className="btn btn-primary btn-lg"
+            <ButtonLink
+              className="w-full"
+              variant="primary"
+              size="lg"
               href="/campaigns"
               onClick={() => session.removeDraft(episodeId)}
               aria-disabled={counts.pending > 0}
               style={counts.pending ? { opacity: 0.45, pointerEvents: "none" } : undefined}
             >
-              {counts.pending ? `Review ${counts.pending} more to finish` : "Done, view campaigns"}
-            </Link>
-            <p className="note">
+              {counts.pending
+                ? `Review ${counts.pending} more to finish`
+                : "Done, view campaigns"}
+            </ButtonLink>
+            <p className="text-xs leading-[1.45] text-muted-foreground">
               {gen?.ready
                 ? "Approving runs the real placement pipeline (Qwen edit + Seedance)."
                 : gen?.mock

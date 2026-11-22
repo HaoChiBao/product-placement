@@ -1,5 +1,7 @@
 import Link from "next/link"
 
+import { cn } from "@/lib/utils"
+
 export function WatchChrome({
   current = "watch",
   meta,
@@ -8,19 +10,35 @@ export function WatchChrome({
   meta?: string
 }) {
   return (
-    <header className="watch-top">
-      <Link href="/" className="watch-brand" aria-label="Inset home">
-        <span className="watch-brand-mark" aria-hidden />
+    <header className="sticky top-0 z-30 flex items-center gap-4 border-b border-border bg-background/78 px-4 py-3.5 backdrop-blur-[14px] sm:px-10">
+      <Link
+        href="/"
+        className="inline-flex items-center gap-2 font-display text-lg font-bold tracking-tight"
+        aria-label="Inset home"
+      >
+        <span className="logo-mark" aria-hidden />
         Inset
       </Link>
-      <nav className="watch-nav" aria-label="Watch">
-        <Link href="/watch" aria-current={current === "watch" ? "page" : undefined}>
+      <nav className="ml-2 hidden items-center gap-1 md:flex" aria-label="Watch">
+        <Link
+          href="/watch"
+          aria-current={current === "watch" ? "page" : undefined}
+          className={cn(
+            "rounded-sm px-2.5 py-1.5 text-[13.5px] font-medium text-muted-foreground transition-colors duration-150",
+            current === "watch" && "bg-card text-foreground"
+          )}
+        >
           Watch
         </Link>
-        <Link href="/videos">Brand flow</Link>
+        <Link
+          href="/videos"
+          className="rounded-sm px-2.5 py-1.5 text-[13.5px] font-medium text-muted-foreground transition-colors duration-150 hover:bg-card hover:text-foreground"
+        >
+          Brand flow
+        </Link>
       </nav>
-      <div className="watch-top-sp" />
-      {meta ? <div className="watch-top-meta">{meta}</div> : null}
+      <div className="flex-1" />
+      {meta ? <div className="text-[12.5px] text-faint">{meta}</div> : null}
     </header>
   )
 }
