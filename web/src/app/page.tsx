@@ -88,7 +88,7 @@ export default function OnboardPage() {
               </Field>
               <Field>
                 <span className="text-[12.5px] font-medium">
-                  Product image <span className="text-muted-foreground">(optional, we can pull one from your site)</span>
+                  Have your own product image? <span className="text-muted-foreground">(optional)</span>
                 </span>
                 <div
                   className="flex cursor-pointer items-center gap-3.5 rounded-md border-[1.5px] border-dashed border-border bg-background p-2.5"
@@ -104,7 +104,9 @@ export default function OnboardPage() {
                   <div className="min-w-0">
                     <b className="text-[13px] font-semibold">{asset ? asset.name : "Upload a PNG"}</b>
                     <div className="mt-0.5 text-[12.5px] text-muted-foreground">
-                      {asset ? `${(asset.size / 1e6).toFixed(1)} MB` : "Plain or transparent background works best"}
+                      {asset
+                        ? `${(asset.size / 1e6).toFixed(1)} MB`
+                        : "Otherwise our research agent finds one on your site"}
                     </div>
                   </div>
                   <input

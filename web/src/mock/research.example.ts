@@ -19,7 +19,6 @@ export const MOCK_RESEARCH: MockResearch = {
     { label: "Reading product page", detail: "price, size, packaging" },
     { label: "Scanning socials and press", detail: "Instagram, TikTok, articles" },
     { label: "Building brand profile", detail: "tone, audience, visual identity" },
-    { label: "Saving brand profile", detail: "POST /api/catalog/brands" },
   ],
   sources: (i) => [
     { kind: "search", url: `google · “${i.business}”`, ms: 800 },

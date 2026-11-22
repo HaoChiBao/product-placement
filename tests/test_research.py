@@ -247,16 +247,17 @@ def test_job_writes_status_contract(tmp_path, monkeypatch):
         "Fetching your website",
         "Reading your pages",
         "Building brand profile",
-        "Saving brand profile",
     ]
     assert st["steps"][1]["detail"] == "pepsi.com · 1 page"
-    assert st["steps"][2]["detail"] == "Opening pepsi.com"
+    assert st["steps"][2]["detail"] == "No usable product image"
+    assert st["agent_steps"] == 1
     assert [s["kind"] for s in st["sources"]] == ["search", "fetch"]
     assert all(isinstance(s["ms"], int) for s in st["sources"])
     assert st["tinyfish_run_id"] == "run_42"
     assert st["streaming_url"] == "https://stream.example/run_42"
     assert st["cached"] is False
     assert st["error"] is None
+    assert st["images"] == []
     assert set(st["profile"]) == BRAND_PROFILE_KEYS
     assert calls.count("agent.tinyfish.ai") == 1
 

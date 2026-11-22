@@ -58,8 +58,9 @@ Brand-side flow (the only UI; the provider and watch APIs are unchanged):
 
 | Route | Role |
 |-------|------|
-| `/` | Your product: business name, website, product, optional product image |
-| `/research` | Brand research with TinyFish (`POST /api/research`, mock without `TINYFISH_API_KEY` or with `?mock=1`), then `POST /api/catalog/brands` |
+| `/` | Your product: business name, website, product, optional own product image |
+| `/research` | Brand research with TinyFish (`POST /api/research`, mock without `TINYFISH_API_KEY` or with `?mock=1`). The job also finds up to 3 product images (agent URL, Shopify JSON, page image links), keyed to transparent PNGs |
+| `/product-image` | Confirm the product image (or upload your own, or skip), then `POST /api/catalog/brands` |
 | `/videos` | Catalog episodes with their detected placement spots |
 | `/review/<titleId>/<episodeId>` | Time bar with every spot; approve queues `placement-swap` (real when Higgsfield keys are set; otherwise queued with key-missing — no fake clip) |
 | `/campaigns` | Draft / in-progress / live campaigns from the DB |
@@ -71,6 +72,8 @@ Generating a placement needs a product image on the brand. Mock research data li
 ```bash
 # local (Python package on PYTHONPATH / editable install + ffmpeg)
 cd web && npm install && npm run dev
+# web unit tests (Node 22.18+)
+cd web && npm test
 ```
 
 Open http://localhost:3000. Seed the Blender open-movie catalog with `POST /api/catalog/seed`, or:

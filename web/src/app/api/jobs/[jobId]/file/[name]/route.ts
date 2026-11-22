@@ -2,11 +2,10 @@ import fs from "fs"
 import path from "path"
 import { NextRequest, NextResponse } from "next/server"
 
+import { jobFileType } from "@/lib/job-files"
 import { runDir } from "@/lib/runs"
 
 export const runtime = "nodejs"
-
-const ALLOWED = new Set(["original.mp4", "result.mp4", "contact_sheet.jpg"])
 
 export async function GET(
   req: NextRequest,
@@ -14,7 +13,8 @@ export async function GET(
 ) {
   const { jobId, name } = await ctx.params
   const safe = path.basename(name)
-  if (!ALLOWED.has(safe)) {
+  const type = jobFileType(safe)
+  if (!type) {
     return NextResponse.json({ error: "file not allowed" }, { status: 400 })
   }
   const filePath = path.join(runDir(jobId), safe)
@@ -23,7 +23,6 @@ export async function GET(
   }
   const buf = fs.readFileSync(filePath)
   const download = req.nextUrl.searchParams.get("download") === "1"
-  const type = safe.endsWith(".jpg") ? "image/jpeg" : "video/mp4"
   const headers: Record<string, string> = {
     "Content-Type": type,
     "Content-Length": String(buf.length),
