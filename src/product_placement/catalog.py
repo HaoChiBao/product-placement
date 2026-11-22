@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from product_placement.db import (
     Connection,
@@ -88,6 +92,60 @@ MIN_POSTER_MEAN_LUMA = 18.0
 BROWSER_SAFE_VIDEO = {"h264", "avc1", "avc", "h.264"}
 BROWSER_SAFE_AUDIO = {"aac", "mp3", "alac"}
 MP4_LIKE_FORMATS = {"mp4", "m4v"}
+IMPORT_LOCK_NAME = "import-movies.lock"
+IMPORT_WAKE_NAME = "import-movies.wake"
+DEFAULT_IMPORT_POLL_S = 60.0
+DEFAULT_FFMPEG_TIMEOUT_S = 7200.0
+DEFAULT_FFMPEG_THREADS = 4
+DEFAULT_IMPORT_MAX_ATTEMPTS = 3
+
+
+def import_tmp_root() -> Path:
+    raw = (os.environ.get("IMPORT_TMP_DIR") or "").strip()
+    root = Path(raw) if raw else data_dir() / "tmp"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _ffmpeg_timeout_s() -> float:
+    try:
+        return float(os.environ.get("FFMPEG_TIMEOUT_S") or DEFAULT_FFMPEG_TIMEOUT_S)
+    except ValueError:
+        return DEFAULT_FFMPEG_TIMEOUT_S
+
+
+def _ffmpeg_threads() -> int:
+    try:
+        return max(1, int(os.environ.get("FFMPEG_THREADS") or DEFAULT_FFMPEG_THREADS))
+    except ValueError:
+        return DEFAULT_FFMPEG_THREADS
+
+
+def _import_max_attempts() -> int:
+    try:
+        return max(1, int(os.environ.get("IMPORT_MAX_ATTEMPTS") or DEFAULT_IMPORT_MAX_ATTEMPTS))
+    except ValueError:
+        return DEFAULT_IMPORT_MAX_ATTEMPTS
+
+
+def _import_poll_s() -> float:
+    try:
+        return max(1.0, float(os.environ.get("IMPORT_POLL_S") or DEFAULT_IMPORT_POLL_S))
+    except ValueError:
+        return DEFAULT_IMPORT_POLL_S
+
+
+def episode_is_watchable(ep: dict[str, Any] | None) -> bool:
+    """Playable catalog original — not an in-flight/failed import pointing at movies/."""
+    if not ep:
+        return False
+    vkey = str(ep.get("video_key") or "").strip()
+    status = str(ep.get("suggest_status") or "").strip().lower()
+    if not vkey or vkey.startswith(MOVIES_PREFIX):
+        return False
+    if status in {"processing", "failed"}:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -100,13 +158,14 @@ def list_titles(
 ) -> list[dict[str, Any]]:
     if not watchable_only:
         return fetchall_dicts(conn, "SELECT * FROM titles ORDER BY created_at")
-    # Playable originals only — hide orphan titles and in-progress imports.
+    # Ready-to-watch only: catalog original present, never processing/failed or movies/.
     return fetchall_dicts(
         conn,
         "SELECT DISTINCT t.* FROM titles t "
         "INNER JOIN episodes e ON e.title_id = t.id "
         "WHERE e.video_key IS NOT NULL AND TRIM(e.video_key) != '' "
-        "AND COALESCE(e.suggest_status, '') != 'processing' "
+        "AND e.video_key NOT LIKE 'movies/%' "
+        "AND LOWER(COALESCE(e.suggest_status, '')) NOT IN ('processing', 'failed') "
         "ORDER BY t.created_at",
     )
 
@@ -155,12 +214,17 @@ def create_title(
 # ---------------------------------------------------------------------------
 
 
-def list_episodes(conn: Connection, *, title_id: str) -> list[dict[str, Any]]:
-    return fetchall_dicts(
+def list_episodes(
+    conn: Connection, *, title_id: str, watchable_only: bool = False
+) -> list[dict[str, Any]]:
+    rows = fetchall_dicts(
         conn,
         "SELECT * FROM episodes WHERE title_id = ? ORDER BY season, episode_number",
         (title_id,),
     )
+    if not watchable_only:
+        return rows
+    return [r for r in rows if episode_is_watchable(r)]
 
 
 def get_episode(conn: Connection, *, id: str) -> dict[str, Any] | None:
@@ -649,81 +713,149 @@ def mp4_has_faststart(path: Path) -> bool:
         return False
 
 
+def _run_ffmpeg(cmd: list[str]) -> None:
+    timeout = _ffmpeg_timeout_s()
+    threads = _ffmpeg_threads()
+    env = os.environ.copy()
+    # Cap libx264 thread pool even when -threads is ignored by some builds.
+    env.setdefault("OMP_NUM_THREADS", str(threads))
+
+    def _nice() -> None:
+        try:
+            os.nice(10)
+        except OSError:
+            pass
+
+    kwargs: dict[str, Any] = {
+        "check": True,
+        "capture_output": True,
+        "timeout": timeout,
+        "env": env,
+    }
+    if hasattr(os, "nice"):
+        kwargs["preexec_fn"] = _nice
+    try:
+        subprocess.run(cmd, **kwargs)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(f"ffmpeg timed out after {timeout:.0f}s") from exc
+
+
 def prepare_browser_mp4(src: Path, dest: Path) -> str:
     """Ensure dest is H.264/AAC (or silent) MP4 with +faststart.
+
+    Maps only the first video/audio streams, drops subs/attachments, caps at
+    1080p, stereo AAC, and bounds CPU via -threads / nice / timeout.
 
     Returns action: 'copy' | 'remux' | 'transcode'.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     info = probe_browser_safety(src)
+    threads = str(_ffmpeg_threads())
+    map_av = ["-map", "0:v:0", "-map", "0:a:0?", "-sn", "-dn"]
     if info["browser_safe_codecs"] and info["in_mp4_like"] and mp4_has_faststart(src):
-        shutil.copy2(src, dest)
-        return "copy"
+        # Still remux through maps so cover-art / extra audio never ship.
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            *map_av,
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            "-threads",
+            threads,
+            str(dest),
+        ]
+        try:
+            _run_ffmpeg(cmd)
+            if dest.is_file() and dest.stat().st_size > 0:
+                return "copy"
+        except (RuntimeError, subprocess.CalledProcessError):
+            dest.unlink(missing_ok=True)
     if info["browser_safe_codecs"]:
         cmd = [
             "ffmpeg",
             "-y",
             "-i",
             str(src),
+            *map_av,
             "-c",
             "copy",
             "-movflags",
             "+faststart",
+            "-threads",
+            threads,
             str(dest),
         ]
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
+            _run_ffmpeg(cmd)
             if dest.is_file() and dest.stat().st_size > 0:
                 return "remux"
-        except subprocess.CalledProcessError:
+        except (RuntimeError, subprocess.CalledProcessError):
             dest.unlink(missing_ok=True)
-    # Transcode to browser-safe H.264 + AAC.
+    # Transcode to browser-safe H.264 + stereo AAC, capped at 1080p.
     dest.unlink(missing_ok=True)
     cmd = [
         "ffmpeg",
         "-y",
         "-i",
         str(src),
+        *map_av,
         "-c:v",
         "libx264",
         "-pix_fmt",
         "yuv420p",
+        "-vf",
+        r"scale=-2:min(1080\,ih)",
         "-crf",
         "20",
         "-preset",
         "veryfast",
+        "-threads",
+        threads,
         "-c:a",
         "aac",
+        "-ac",
+        "2",
         "-b:a",
         "128k",
         "-movflags",
         "+faststart",
         str(dest),
     ]
-    # Some sources have no audio — drop -c:a if needed.
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
-    except subprocess.CalledProcessError:
+        _run_ffmpeg(cmd)
+    except (RuntimeError, subprocess.CalledProcessError):
         dest.unlink(missing_ok=True)
         cmd_no_audio = [
             "ffmpeg",
             "-y",
             "-i",
             str(src),
+            "-map",
+            "0:v:0",
+            "-sn",
+            "-dn",
             "-c:v",
             "libx264",
             "-pix_fmt",
             "yuv420p",
+            "-vf",
+            r"scale=-2:min(1080\,ih)",
             "-crf",
             "20",
             "-preset",
             "veryfast",
+            "-threads",
+            threads,
             "-an",
             "-movflags",
             "+faststart",
             str(dest),
         ]
-        subprocess.run(cmd_no_audio, check=True, capture_output=True)
+        _run_ffmpeg(cmd_no_audio)
     if not dest.is_file() or dest.stat().st_size == 0:
         raise RuntimeError(f"ffmpeg failed to produce playable mp4 from {src}")
     return "transcode"
@@ -915,6 +1047,76 @@ def migrate_catalog_object_keys(conn: Connection | None = None) -> dict[str, Any
     return {"moved": moved, "moved_count": len(moved), "skipped": skipped}
 
 
+def _safe_etag_token(etag: str) -> str:
+    return re.sub(r"[^\w.-]", "_", etag)[:80] or "unknown"
+
+
+def _import_work_dir(key: str, etag: str) -> Path:
+    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+    path = import_tmp_root() / "import" / digest / _safe_etag_token(etag)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _cleanup_import_work_dir(path: Path) -> None:
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+        parent = path.parent
+        if parent.is_dir() and not any(parent.iterdir()):
+            parent.rmdir()
+    except OSError:
+        pass
+
+
+def _download_movie_source(
+    store: ObjectStore, key: str, dest: Path, *, size: int
+) -> Path:
+    """Download ``key`` to ``dest``, reusing a complete prior download for the same ETag."""
+    if dest.is_file() and size > 0 and dest.stat().st_size == size:
+        seed_log("resume download key=%s bytes=%s", key, size)
+        return dest
+    if dest.exists():
+        dest.unlink(missing_ok=True)
+    partial = dest.with_suffix(dest.suffix + ".partial")
+    partial.unlink(missing_ok=True)
+    seed_log("download start key=%s dest=%s", key, dest)
+    _stream_store_to_file(store, key, partial)
+    partial.replace(dest)
+    seed_log("download done key=%s bytes=%s", key, dest.stat().st_size)
+    return dest
+
+
+def _episode_import_attempts(ep: dict[str, Any] | None) -> int:
+    if not ep:
+        return 0
+    try:
+        return int(ep.get("import_attempts") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _should_skip_imported(
+    prior: dict[str, Any] | None, *, key: str, dest_key: str, store: ObjectStore
+) -> bool:
+    """True when this movies/ object already has a playable catalog original."""
+    if not prior:
+        return False
+    status = str(prior.get("suggest_status") or "").lower()
+    vkey = str(prior.get("video_key") or "")
+    if status == "processing":
+        return False
+    if status == "failed":
+        # Retry failed imports unless attempts are exhausted (handled by caller).
+        if vkey == dest_key or store.exists(dest_key):
+            return True
+        return False
+    if vkey == dest_key or (vkey and not vkey.startswith(MOVIES_PREFIX) and store.exists(vkey)):
+        return True
+    if store.exists(dest_key):
+        return True
+    return False
+
+
 def import_movies_from_store(
     conn: Connection | None = None,
     *,
@@ -931,8 +1133,12 @@ def import_movies_from_store(
     keys = store.list_keys(prefix)
     created: list[dict[str, Any]] = []
     skipped_existing = 0
+    skipped_max_attempts = 0
     ignored = 0
     failed: list[dict[str, str]] = []
+    max_attempts = _import_max_attempts()
+
+    seed_log("import-movies scan prefix=%s keys=%s", prefix, len(keys))
 
     for key in keys:
         rel = key[len(prefix) :] if key.startswith(prefix) else key
@@ -956,15 +1162,30 @@ def import_movies_from_store(
                 "SELECT * FROM episodes WHERE title_id = ? AND season = 1 AND episode_number = 1",
                 (title["id"],),
             )
-        # Already imported (catalog original or still pointing at this movies/ key).
-        if prior and prior.get("suggest_status") != "processing":
-            vkey = prior.get("video_key") or ""
-            if vkey in {dest_key, key} or store.exists(dest_key):
-                skipped_existing += 1
-                continue
 
-        seed_log("import movie key=%s slug=%s", key, slug)
+        if _should_skip_imported(prior, key=key, dest_key=dest_key, store=store):
+            skipped_existing += 1
+            continue
+
+        attempts = _episode_import_attempts(prior)
+        status = str((prior or {}).get("suggest_status") or "").lower()
+        if status == "failed" and attempts >= max_attempts:
+            skipped_max_attempts += 1
+            seed_log(
+                "skip movie import %s: max attempts %s",
+                key,
+                attempts,
+            )
+            continue
+
+        seed_log("import movie key=%s slug=%s attempt=%s", key, slug, attempts + 1)
+        work_dir: Path | None = None
         try:
+            meta = store.head(key)
+            etag = str(meta.get("etag") or "unknown")
+            size = int(meta.get("size") or 0)
+            work_dir = _import_work_dir(key, etag)
+
             if not title:
                 title = create_title(
                     conn,
@@ -973,8 +1194,15 @@ def import_movies_from_store(
                     slug=slug,
                     synopsis=f"Imported from {key}",
                 )
-            if prior and prior.get("suggest_status") == "processing":
+            if prior and status in {"processing", "failed"}:
                 ep = prior
+                conn.execute(
+                    "UPDATE episodes SET video_key = ?, suggest_status = ?, "
+                    "import_attempts = ? WHERE id = ?",
+                    (key, "processing", attempts + 1, ep["id"]),
+                )
+                conn.commit()
+                ep = get_episode(conn, id=str(ep["id"])) or ep
             else:
                 ep = create_episode(
                     conn,
@@ -985,34 +1213,36 @@ def import_movies_from_store(
                     video_key=None,
                     suggest_status="processing",
                 )
-                # create_episode without video leaves video_key null — set source hint.
                 conn.execute(
-                    "UPDATE episodes SET video_key = ?, suggest_status = ? WHERE id = ?",
-                    (key, "processing", ep["id"]),
+                    "UPDATE episodes SET video_key = ?, suggest_status = ?, "
+                    "import_attempts = ? WHERE id = ?",
+                    (key, "processing", attempts + 1, ep["id"]),
                 )
                 conn.commit()
                 ep = get_episode(conn, id=str(ep["id"])) or ep
 
-            with tempfile.TemporaryDirectory() as tmp:
-                tmp_path = Path(tmp)
-                src_local = tmp_path / f"source{ext}"
-                _stream_store_to_file(store, key, src_local)
-                playable = tmp_path / "original.mp4"
-                action = prepare_browser_mp4(src_local, playable)
-                seed_log("movie %s prepare action=%s", slug, action)
-                store.put_file(playable, dest_key, content_type="video/mp4")
-                dur = _probe_duration(playable)
-                conn.execute(
-                    "UPDATE episodes SET video_key = ?, duration_s = ?, suggest_status = ? "
-                    "WHERE id = ?",
-                    (dest_key, float(dur or 0.0), "queued", ep["id"]),
-                )
-                conn.commit()
-                try:
-                    ensure_episode_poster(conn, str(ep["id"]))
-                except Exception as exc:
-                    log.warning("poster failed for %s: %s", key, exc)
-                ep = get_episode(conn, id=str(ep["id"])) or ep
+            src_local = work_dir / f"source{ext}"
+            _download_movie_source(store, key, src_local, size=size)
+            playable = work_dir / "original.mp4"
+            if playable.exists():
+                playable.unlink(missing_ok=True)
+            action = prepare_browser_mp4(src_local, playable)
+            seed_log("movie %s prepare action=%s", slug, action)
+            store.put_file(playable, dest_key, content_type="video/mp4")
+            dur = _probe_duration(playable)
+            conn.execute(
+                "UPDATE episodes SET video_key = ?, duration_s = ?, suggest_status = ? "
+                "WHERE id = ?",
+                (dest_key, float(dur or 0.0), "queued", ep["id"]),
+            )
+            conn.commit()
+            try:
+                ensure_episode_poster(conn, str(ep["id"]))
+            except Exception as exc:
+                log.warning("poster failed for %s: %s", key, exc)
+            ep = get_episode(conn, id=str(ep["id"])) or ep
+            _cleanup_import_work_dir(work_dir)
+            work_dir = None
 
             created.append(
                 {
@@ -1024,16 +1254,16 @@ def import_movies_from_store(
                     "slug": slug,
                 }
             )
+            seed_log("import movie done key=%s slug=%s", key, slug)
         except Exception as exc:
             seed_log("skip movie import %s: %s", key, exc)
             log.warning("skip movie import %s: %s", key, exc)
             failed.append({"key": key, "error": str(exc)})
-            # Leave/mark processing row as failed so /watch stays clean.
             if title:
                 bad = fetchone_dict(
                     conn,
-                    "SELECT id FROM episodes WHERE title_id = ? AND season = 1 "
-                    "AND episode_number = 1 AND suggest_status = 'processing'",
+                    "SELECT id, import_attempts FROM episodes WHERE title_id = ? AND season = 1 "
+                    "AND episode_number = 1",
                     (title["id"],),
                 )
                 if bad:
@@ -1042,6 +1272,10 @@ def import_movies_from_store(
                         ("failed", bad["id"]),
                     )
                     conn.commit()
+            # Keep complete temp download for the same ETag; drop broken outputs.
+            if work_dir is not None:
+                playable = work_dir / "original.mp4"
+                playable.unlink(missing_ok=True)
 
     from product_placement.jobs import reset_stale_suggest_running
 
@@ -1052,7 +1286,14 @@ def import_movies_from_store(
         "OR suggest_status IS NULL OR suggest_status = '' "
         "ORDER BY created_at",
     )
-    titles_out = list_titles(conn)
+    # Suggest-queue should not re-drive import failures (movies/ keys).
+    need_suggest = [
+        ep
+        for ep in need_suggest
+        if not str(ep.get("video_key") or "").startswith(MOVIES_PREFIX)
+        and str(ep.get("suggest_status") or "").lower() != "processing"
+    ]
+    titles_out = list_titles(conn, watchable_only=True)
     if own:
         conn.close()
     return {
@@ -1064,10 +1305,160 @@ def import_movies_from_store(
         "reclaimed_running": reclaimed,
         "titles": titles_out,
         "skipped_existing": skipped_existing,
+        "skipped_max_attempts": skipped_max_attempts,
         "ignored_non_video": ignored,
         "failed": failed,
         "prefix": prefix,
     }
+
+
+# ---------------------------------------------------------------------------
+# Import lock + background worker
+# ---------------------------------------------------------------------------
+
+
+def _import_lock_path() -> Path:
+    return data_dir() / IMPORT_LOCK_NAME
+
+
+def _import_wake_path() -> Path:
+    return data_dir() / IMPORT_WAKE_NAME
+
+
+def request_movies_import() -> dict[str, str]:
+    """Wake the background import worker (or a one-shot import process)."""
+    path = _import_wake_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(utc_now() + "\n", encoding="utf-8")
+    seed_log("import wake requested path=%s", path)
+    return {"wake": str(path)}
+
+
+def _clear_import_wake() -> None:
+    path = _import_wake_path()
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+@contextmanager
+def movies_import_lock(*, blocking: bool = True) -> Iterator[bool]:
+    """Exclusive lock so boot, poller, and manual trigger never import concurrently."""
+    import fcntl
+
+    path = _import_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a+", encoding="utf-8")
+    acquired = False
+    try:
+        flags = fcntl.LOCK_EX
+        if not blocking:
+            flags |= fcntl.LOCK_NB
+        try:
+            fcntl.flock(fh.fileno(), flags)
+            acquired = True
+        except BlockingIOError:
+            acquired = False
+        if acquired:
+            fh.seek(0)
+            fh.truncate()
+            fh.write(f"{os.getpid()} {utc_now()}\n")
+            fh.flush()
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+            except OSError:
+                pass
+        fh.close()
+
+
+def import_movies_with_lock(
+    *, blocking: bool = True, conn: Connection | None = None
+) -> dict[str, Any]:
+    with movies_import_lock(blocking=blocking) as acquired:
+        if not acquired:
+            seed_log("import-movies skipped: lock held")
+            return {
+                "skipped": True,
+                "reason": "import already running",
+                "imported": 0,
+                "episodes": [],
+                "suggest_queue": [],
+                "failed": [],
+            }
+        _clear_import_wake()
+        return import_movies_from_store(conn)
+
+
+def spawn_episode_suggest_detached(episode_id: str) -> None:
+    subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "product_placement.jobs",
+            "episode-suggest",
+            "--episode-id",
+            str(episode_id),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        env={**os.environ, "PYTHONPATH": os.environ.get("PYTHONPATH") or str(Path(__file__).resolve().parents[1])},
+    )
+
+
+def _drain_suggest_queue(result: dict[str, Any]) -> None:
+    queue = result.get("suggest_queue") or result.get("episodes") or []
+    for ep in queue:
+        if not isinstance(ep, dict):
+            continue
+        eid = ep.get("id")
+        if not eid:
+            continue
+        st = str(ep.get("suggest_status") or "queued").lower()
+        if st in {"queued", "failed", ""}:
+            seed_log("spawn episode-suggest %s", eid)
+            try:
+                spawn_episode_suggest_detached(str(eid))
+            except Exception as exc:
+                log.warning("spawn suggest failed for %s: %s", eid, exc)
+
+
+def _wait_poll_or_wake(seconds: float) -> None:
+    deadline = time.monotonic() + max(0.1, seconds)
+    wake = _import_wake_path()
+    while time.monotonic() < deadline:
+        if wake.exists():
+            _clear_import_wake()
+            seed_log("import worker woken early")
+            return
+        time.sleep(0.5)
+
+
+def run_movies_import_worker(*, poll_s: float | None = None) -> None:
+    """Long-lived poller: import new movies/ objects one pass at a time."""
+    _configure_catalog_logging()
+    interval = poll_s if poll_s is not None else _import_poll_s()
+    seed_log("import worker start poll_s=%s tmp=%s", interval, import_tmp_root())
+    while True:
+        try:
+            result = import_movies_with_lock(blocking=True)
+            imported = int(result.get("imported") or 0)
+            seed_log(
+                "import worker pass imported=%s skipped_existing=%s failed=%s",
+                imported,
+                result.get("skipped_existing"),
+                len(result.get("failed") or []),
+            )
+            if imported:
+                _drain_suggest_queue(result)
+        except Exception as exc:
+            seed_log("import worker error: %s", exc)
+            log.exception("import worker error")
+        _wait_poll_or_wake(interval)
 
 
 # ---------------------------------------------------------------------------
@@ -1441,7 +1832,7 @@ def get_watch_payload(
         "SELECT * FROM episodes WHERE title_id = ? AND season = ? AND episode_number = ?",
         (title["id"], int(season), int(episode)),
     )
-    if not ep:
+    if not ep or not episode_is_watchable(ep):
         raise FileNotFoundError(f"episode not found: s{season}e{episode}")
 
     store = get_object_store()
@@ -1840,7 +2231,7 @@ def build_parser() -> argparse.ArgumentParser:
     lt.add_argument(
         "--watchable",
         action="store_true",
-        help="Only titles with at least one non-processing episode",
+        help="Only titles with at least one ready (playable) episode",
     )
 
     gt = add("get-title")
@@ -1855,6 +2246,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     le = add("list-episodes")
     le.add_argument("--title-id", required=True)
+    le.add_argument(
+        "--watchable",
+        action="store_true",
+        help="Only playable episodes (hide processing/failed/movies/)",
+    )
 
     ge = add("get-episode")
     ge.add_argument("--id", required=True)
@@ -1915,7 +2311,29 @@ def build_parser() -> argparse.ArgumentParser:
     wp.add_argument("--brand-id", default=None)
 
     add("seed-blender")
-    add("import-movies")
+    im = add("import-movies")
+    im.add_argument(
+        "--once",
+        action="store_true",
+        help="Run a single locked import pass (default)",
+    )
+    im.add_argument(
+        "--non-blocking",
+        action="store_true",
+        help="Return immediately if another import holds the lock",
+    )
+    iw = add("import-movies-worker")
+    iw.add_argument(
+        "--poll-s",
+        type=float,
+        default=None,
+        help="Seconds between polls (default IMPORT_POLL_S or 60)",
+    )
+    iw.add_argument(
+        "--request",
+        action="store_true",
+        help="Only touch the wake file and exit",
+    )
     add("backfill-posters")
     add("migrate-catalog-keys")
 
@@ -1957,7 +2375,13 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         if args.command == "list-episodes":
-            _print_json(list_episodes(conn, title_id=args.title_id))
+            _print_json(
+                list_episodes(
+                    conn,
+                    title_id=args.title_id,
+                    watchable_only=bool(args.watchable),
+                )
+            )
             return
 
         if args.command == "get-episode":
@@ -2070,7 +2494,20 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         if args.command == "import-movies":
-            _print_json(import_movies_from_store(conn))
+            _print_json(
+                import_movies_with_lock(
+                    blocking=not bool(args.non_blocking),
+                    conn=conn,
+                )
+            )
+            return
+
+        if args.command == "import-movies-worker":
+            if args.request:
+                _print_json(request_movies_import())
+                return
+            conn.close()
+            run_movies_import_worker(poll_s=args.poll_s)
             return
 
         if args.command == "backfill-posters":
@@ -2083,7 +2520,11 @@ def main(argv: list[str] | None = None) -> None:
 
         raise SystemExit(f"unknown command {args.command}")
     finally:
-        conn.close()
+        if args.command != "import-movies-worker" or getattr(args, "request", False):
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

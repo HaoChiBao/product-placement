@@ -6,7 +6,7 @@ import logging
 import mimetypes
 import os
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO
 from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
@@ -61,6 +61,10 @@ class ObjectStore:
         raise NotImplementedError
 
     def exists(self, key: str) -> bool:
+        raise NotImplementedError
+
+    def head(self, key: str) -> dict[str, Any]:
+        """Return ``{"size": int, "etag": str}`` for an object."""
         raise NotImplementedError
 
     def list_keys(self, prefix: str = "") -> list[str]:
@@ -133,6 +137,14 @@ class LocalObjectStore(ObjectStore):
 
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
+
+    def head(self, key: str) -> dict[str, Any]:
+        path = self._path(key)
+        if not path.is_file():
+            raise FileNotFoundError(f"object not found: {key}")
+        st = path.stat()
+        etag = f"local-{st.st_mtime_ns}-{st.st_size}"
+        return {"size": int(st.st_size), "etag": etag}
 
     def list_keys(self, prefix: str = "") -> list[str]:
         cleaned = (prefix or "").lstrip("/").replace("..", "_")
@@ -243,16 +255,27 @@ class S3ObjectStore(ObjectStore):
         return body
 
     def exists(self, key: str) -> bool:
+        try:
+            self.head(key)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def head(self, key: str) -> dict[str, Any]:
         from botocore.exceptions import ClientError
 
         try:
-            self.client.head_object(Bucket=self.bucket, Key=key)
-            return True
+            resp = self.client.head_object(Bucket=self.bucket, Key=key)
         except ClientError as exc:
             code = (exc.response.get("Error") or {}).get("Code")
             if code in {"404", "NoSuchKey", "NotFound"}:
-                return False
+                raise FileNotFoundError(f"object not found: {key}") from exc
             raise
+        etag = str(resp.get("ETag") or "").strip().strip('"')
+        size = int(resp.get("ContentLength") or 0)
+        if not etag:
+            etag = f"s3-{size}"
+        return {"size": size, "etag": etag}
 
     def list_keys(self, prefix: str = "") -> list[str]:
         keys: list[str] = []

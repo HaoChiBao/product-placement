@@ -8,9 +8,14 @@ export const maxDuration = 60
 export async function GET(req: NextRequest) {
   try {
     ensureCatalogDb()
+    const all = req.nextUrl.searchParams.get("all")
     const watchable = req.nextUrl.searchParams.get("watchable")
     const args = ["list-titles"]
-    if (watchable === "1" || watchable === "true") {
+    // Default: only titles with a ready/playable episode. Opt out with ?all=1.
+    const wantAll = all === "1" || all === "true"
+    const wantWatchable =
+      !wantAll && (watchable === null || watchable === "1" || watchable === "true")
+    if (wantWatchable) {
       args.push("--watchable")
     }
     const titles = catalogCmd(args)

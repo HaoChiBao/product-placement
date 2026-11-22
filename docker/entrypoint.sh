@@ -9,8 +9,9 @@ export MODEL_CACHE_DIR="${MODEL_CACHE_DIR:-/app/models}"
 export HOSTNAME="${HOSTNAME:-0.0.0.0}"
 export PORT="${PORT:-3000}"
 export SEED_CATALOG_ON_BOOT="${SEED_CATALOG_ON_BOOT:-1}"
+export IMPORT_POLL_S="${IMPORT_POLL_S:-60}"
 
-mkdir -p "${DATA_DIR}/jobs" "${DATA_DIR}/objects"
+mkdir -p "${DATA_DIR}/jobs" "${DATA_DIR}/objects" "${DATA_DIR}/tmp"
 
 # Schema + optional catalog seed in the background so Railway healthchecks
 # are not blocked by Blender downloads. seed-blender is idempotent.
@@ -23,8 +24,6 @@ mkdir -p "${DATA_DIR}/jobs" "${DATA_DIR}/objects"
   if [[ "${SEED_CATALOG_ON_BOOT}" == "1" || "${SEED_CATALOG_ON_BOOT}" == "true" ]]; then
     echo "[catalog-boot] seed-blender (idempotent)"
     "${PYTHON_BIN}" -m product_placement.catalog seed-blender
-    echo "[catalog-boot] import-movies (idempotent)"
-    "${PYTHON_BIN}" -m product_placement.catalog import-movies
     echo "[catalog-boot] drain episode-suggest queue"
     "${PYTHON_BIN}" - <<'PY'
 from product_placement.db import fetchall_dicts, get_connection, init_schema
@@ -37,11 +36,17 @@ reset = reset_stale_suggest_running(conn)
 print(f"[catalog-boot] reclaimed stale running={reset}", flush=True)
 eps = fetchall_dicts(
     conn,
-    "SELECT id, suggest_status FROM episodes "
+    "SELECT id, suggest_status, video_key FROM episodes "
     "WHERE suggest_status IN ('queued', 'failed') "
     "OR suggest_status IS NULL OR suggest_status = ''",
 )
 conn.close()
+# Never point suggest at raw movies/ keys still importing.
+eps = [
+    ep
+    for ep in eps
+    if not str(ep.get("video_key") or "").startswith("movies/")
+]
 print(f"[catalog-boot] suggest queue size={len(eps)}", flush=True)
 for ep in eps:
     eid = ep["id"]
@@ -56,6 +61,13 @@ PY
   fi
   echo "[catalog-boot] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 ) 2>&1 | tee -a "${DATA_DIR}/catalog-boot.log" &
+
+# Long-lived movies/ import poller (locked; woken by POST /api/catalog/import-movies).
+echo "[catalog-boot] starting import-movies-worker poll_s=${IMPORT_POLL_S}"
+(
+  set +e
+  "${PYTHON_BIN}" -m product_placement.catalog import-movies-worker --poll-s "${IMPORT_POLL_S}"
+) 2>&1 | tee -a "${DATA_DIR}/catalog-import.log" &
 
 SERVER_JS="/app/web-standalone/server.js"
 if [[ ! -f "${SERVER_JS}" ]]; then
