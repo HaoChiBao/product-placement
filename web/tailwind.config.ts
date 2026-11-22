@@ -1,6 +1,7 @@
 import type { Config } from "tailwindcss"
 
 export default {
+  darkMode: "class",
   content: [
     "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
     "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
@@ -23,6 +24,9 @@ export default {
         accent: "var(--accent)",
         "accent-foreground": "var(--accent-foreground)",
         "accent-soft": "var(--accent-soft)",
+        success: "var(--success)",
+        "success-foreground": "var(--success-foreground)",
+        "success-soft": "var(--success-soft)",
         warning: "var(--warning)",
         "warning-soft": "var(--warning-soft)",
         destructive: "var(--destructive)",
@@ -69,11 +73,16 @@ export default {
           from: { left: "-30%" },
           to: { left: "100%" },
         },
+        "caret-blink": {
+          "0%,70%,100%": { opacity: "1" },
+          "20%,50%": { opacity: "0" },
+        },
       },
       animation: {
         shimmer: "shimmer 1.2s linear infinite",
         spin: "spin 0.7s linear infinite",
         scan: "scan 1.1s linear infinite",
+        "caret-blink": "caret-blink 1.25s ease-out infinite",
       },
     },
   },

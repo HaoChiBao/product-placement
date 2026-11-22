@@ -5,8 +5,8 @@ import { useEffect, useRef, useState } from "react"
 
 import { TextEffect } from "@/components/motion-primitives/text-effect"
 import { TopBar } from "@/components/top-bar"
-import { Button } from "@/components/ui/button"
-import { Panel } from "@/components/ui/card"
+import { TextureButton } from "@/components/ui/texture-button"
+import { TextureCard, TextureCardContent } from "@/components/ui/texture-card"
 import { Field, Input, Label, Textarea } from "@/components/ui/input"
 import { PageShell } from "@/components/ui/page-shell"
 import { research, type ResearchInput } from "@/lib/research"
@@ -70,7 +70,8 @@ export default function OnboardPage() {
               ))}
             </ul>
           </div>
-          <Panel>
+          <TextureCard className="shadow-soft">
+            <TextureCardContent className="p-0 text-foreground">
             <form className="flex flex-col gap-3.5 p-[22px]" onSubmit={submit}>
               <Field>
                 <Label htmlFor="o-biz">Business name</Label>
@@ -125,11 +126,12 @@ export default function OnboardPage() {
                 </Label>
                 <Textarea id="o-note" rows={2} value={form.note} onChange={set("note")} />
               </Field>
-              <Button variant="primary" size="lg" className="w-full">
+              <TextureButton type="submit" variant="primary" size="lg" className="mt-1">
                 Research my brand →
-              </Button>
+              </TextureButton>
             </form>
-          </Panel>
+            </TextureCardContent>
+          </TextureCard>
         </div>
       </PageShell>
     </>

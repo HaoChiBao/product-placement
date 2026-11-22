@@ -3,6 +3,7 @@
 import { useParams, useRouter } from "next/navigation"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
+import { PlacementIsland } from "@/components/placement-island"
 import { TopBar, useToast } from "@/components/top-bar"
 import { Badge } from "@/components/ui/badge"
 import { Button, ButtonLink } from "@/components/ui/button"
@@ -275,28 +276,30 @@ export default function ReviewPage() {
                 </div>
               ) : null}
 
-              {m && !showClip && !holding && st !== "pending" ? (
-                <div className="absolute inset-0 grid place-items-center bg-black/45">
-                  {IN_FLIGHT.includes(st) ? (
-                    <>
-                      <div className="scan" />
-                      <div className="relative flex items-center gap-2.5 rounded-[10px] bg-black/75 px-4 py-3 text-[13px] text-white">
-                        <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-                        Placing your product in this moment…
-                      </div>
-                    </>
-                  ) : st === "rejected" ? (
-                    <div className="rounded-[10px] bg-black/75 px-4 py-3 text-[13px] text-white">
-                      Rejected · original kept
-                    </div>
-                  ) : st === "failed" ? (
-                    <div className="rounded-[10px] bg-black/75 px-4 py-3 text-[13px] text-white">
-                      {/no product asset/i.test(placements[m.id]?.error || "")
-                        ? "No product image on file. Upload one to generate this placement."
-                        : `Generation failed${placements[m.id]?.error ? `: ${placements[m.id]?.error}` : ""}`}
-                    </div>
-                  ) : null}
+              {m && !showClip && !holding && IN_FLIGHT.includes(st) ? (
+                <div className="absolute inset-0 bg-black/35">
+                  <div className="scan" />
                 </div>
+              ) : null}
+
+              {m ? (
+                <PlacementIsland
+                  status={
+                    IN_FLIGHT.includes(st)
+                      ? "generating"
+                      : st === "ready" || st === "rejected" || st === "failed"
+                        ? st
+                        : "pending"
+                  }
+                  index={cur + 1}
+                  total={list.length}
+                  what={m.whats_there || "spot"}
+                  message={
+                    /no product asset/i.test(placements[m.id]?.error || "")
+                      ? "No product image on file. Upload one to generate this placement."
+                      : placements[m.id]?.error || "Try again from the list."
+                  }
+                />
               ) : null}
 
               {m ? (
@@ -357,7 +360,7 @@ export default function ReviewPage() {
                 Pending
                 <i className="ml-2 size-2 rounded-sm bg-[#e6a24a] not-italic" />
                 Generating
-                <i className="ml-2 size-2 rounded-sm bg-accent not-italic" />
+                <i className="ml-2 size-2 rounded-sm bg-success not-italic" />
                 Ready
                 <i className="ml-2 size-2 rounded-sm bg-[#e5484d] not-italic" />
                 Rejected
@@ -457,7 +460,7 @@ export default function ReviewPage() {
                   className={cn(
                     "flex flex-col gap-2.5 rounded-md border-[1.5px] border-border bg-card p-2.5 text-left",
                     i === cur && "border-foreground",
-                    s === "ready" && "border-accent",
+                    s === "ready" && "border-success",
                     (s === "rejected" || s === "failed") && "border-destructive"
                   )}
                 >

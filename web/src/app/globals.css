@@ -3,97 +3,54 @@
 @tailwind utilities;
 
 :root {
-  --background: #f5f6f3;
-  --foreground: #141815;
-  --card: #ffffff;
-  --card-foreground: #141815;
-  --primary: #141815;
-  --primary-foreground: #f5f6f3;
-  --secondary: #eceeea;
-  --secondary-foreground: #141815;
-  --muted: #eceeea;
-  --muted-foreground: #5d655e;
-  --faint: #8a928b;
-  --accent: #13a452;
-  --accent-foreground: #0a6b33;
-  --accent-soft: #e2f3e8;
-  --warning: #b86e12;
-  --warning-soft: #fbefd9;
-  --destructive: #d93a40;
-  --destructive-soft: #fbe6e7;
-  --border: #e0e4df;
-  --input: #e0e4df;
-  --ring: #13a452;
-  --stage: #0d100e;
-  --stage-2: #171b18;
-  --stage-line: #2a302b;
-  --stage-ink: #e9ece9;
-  --stage-muted: #8e978f;
-  --shadow: 0 1px 2px rgba(20, 24, 21, 0.06), 0 8px 24px rgba(20, 24, 21, 0.06);
-  --radius: 14px;
-  --radius-md: 10px;
-  --radius-sm: 8px;
-  --radius-xs: 6px;
-  --account: #c8641c;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not(.theme-cinema) {
-    --background: #0f1211;
-    --foreground: #eceeec;
-    --card: #161a18;
-    --card-foreground: #eceeec;
-    --primary: #eceeec;
-    --primary-foreground: #0f1211;
-    --secondary: #1d221f;
-    --secondary-foreground: #eceeec;
-    --muted: #1d221f;
-    --muted-foreground: #9aa39c;
-    --faint: #6e776f;
-    --accent: #3dd67f;
-    --accent-foreground: #7fe8ac;
-    --accent-soft: #15301f;
-    --warning: #e6a24a;
-    --warning-soft: #33260f;
-    --destructive: #f2555a;
-    --destructive-soft: #3a1618;
-    --border: #2a302c;
-    --input: #2a302c;
-    --ring: #3dd67f;
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.25);
-    color-scheme: dark;
-  }
+  /* Netflix-style dark theme: near-black canvas, red brand accent, white type */
+  --background: #141414;
+  --foreground: #ffffff;
+  --card: #1f1f1f;
+  --card-foreground: #ffffff;
+  --primary: #e50914;
+  --primary-foreground: #ffffff;
+  --secondary: #2a2a2a;
+  --secondary-foreground: #ffffff;
+  --muted: #232323;
+  --muted-foreground: #b3b3b3;
+  --faint: #808080;
+  --accent: #e50914;
+  --accent-foreground: #ff6b72;
+  --accent-soft: rgba(229, 9, 20, 0.16);
+  --success: #46d369;
+  --success-foreground: #7be495;
+  --success-soft: rgba(70, 211, 105, 0.14);
+  --warning: #f5a524;
+  --warning-soft: rgba(245, 165, 36, 0.14);
+  --destructive: #ff4d55;
+  --destructive-soft: rgba(255, 77, 85, 0.14);
+  --border: rgba(255, 255, 255, 0.12);
+  --input: rgba(255, 255, 255, 0.14);
+  --ring: #e50914;
+  --stage: #000000;
+  --stage-2: #181818;
+  --stage-line: #2a2a2a;
+  --stage-ink: #ffffff;
+  --stage-muted: #a3a3a3;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 12px 32px rgba(0, 0, 0, 0.45);
+  --radius: 10px;
+  --radius-md: 8px;
+  --radius-sm: 6px;
+  --radius-xs: 4px;
+  --account: #e50914;
+  color-scheme: dark;
 }
 
 /* Watch / cinema surface — Annie brand flow stays on brand tokens */
 .theme-cinema {
-  --background: #070809;
-  --foreground: #f3f4f2;
-  --card: #121416;
-  --card-foreground: #f3f4f2;
-  --primary: #f3f4f2;
-  --primary-foreground: #070809;
-  --secondary: #1a1d21;
-  --secondary-foreground: #f3f4f2;
-  --muted: #1a1d21;
-  --muted-foreground: #9aa3a0;
-  --faint: #6b7370;
-  --accent: #3dd67f;
-  --accent-foreground: #05210e;
-  --accent-soft: #15301f;
-  --warning: #e6a24a;
-  --warning-soft: #33260f;
-  --destructive: #f2555a;
-  --destructive-soft: #3a1618;
-  --border: rgba(255, 255, 255, 0.08);
-  --input: rgba(255, 255, 255, 0.08);
-  --ring: #3dd67f;
-  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 16px 40px rgba(0, 0, 0, 0.35);
-  color-scheme: dark;
+  --background: #141414;
+  --card: #181818;
+  --accent: #e50914;
+  --accent-foreground: #ffffff;
+  --ring: #e50914;
   min-height: 100dvh;
-  background:
-    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(61, 214, 127, 0.08), transparent 55%),
-    linear-gradient(180deg, #0a0c0d 0%, #070809 40%, #050606 100%);
+  background: var(--background);
   color: var(--foreground);
 }
 
@@ -214,7 +171,7 @@
     left: -1.5px;
     top: -19px;
     background: var(--accent);
-    color: #06210f;
+    color: #ffffff;
     font: 500 10px/1 var(--font-mono), ui-monospace, monospace;
     padding: 3px 5px;
     border-radius: 3px 3px 3px 0;
@@ -284,7 +241,7 @@
     background: #e6a24a;
   }
   .ap-mk[data-st="ready"] {
-    background: var(--accent);
+    background: var(--success);
   }
   .ap-mk[data-st="rejected"],
   .ap-mk[data-st="failed"] {
