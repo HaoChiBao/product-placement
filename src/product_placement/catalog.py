@@ -1744,6 +1744,9 @@ def create_brand(
 def list_placements(
     conn: Connection, *, brand_id: str, episode_id: str | None = None
 ) -> list[dict[str, Any]]:
+    from product_placement.jobs import fail_stale_placements
+
+    fail_stale_placements(conn)
     if episode_id:
         return fetchall_dicts(
             conn,

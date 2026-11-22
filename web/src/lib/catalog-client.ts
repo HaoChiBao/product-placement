@@ -47,6 +47,8 @@ export type Placement = {
   episode_id: string
   status: "approved" | "rejected" | "queued" | "rendering" | "ready" | "failed"
   clip_key?: string | null
+  clip_start_s?: number | null
+  clip_end_s?: number | null
   error?: string | null
   updated_at?: string
 }

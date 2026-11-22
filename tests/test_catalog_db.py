@@ -339,6 +339,133 @@ def test_watch_uses_clamped_clip_window(catalog_env):
     assert hit["end_s"] == 25.0
 
 
+def test_stale_rendering_becomes_failed_and_can_retry(catalog_env):
+    from datetime import datetime, timedelta, timezone
+
+    conn, _data = catalog_env
+    title = create_title(conn, name="Stale Film", kind="movie", slug="stale-film")
+    vkey = catalog_video_key(title["slug"], 1, 1)
+    get_object_store().put_bytes(b"mp4", vkey, content_type="video/mp4")
+    ep = create_episode(
+        conn,
+        title_id=title["id"],
+        name="Pilot",
+        season=1,
+        episode=1,
+        video_key=vkey,
+        duration_s=40.0,
+        suggest_status="ready",
+    )
+    brand = create_brand(conn, name="Brand S", brief="cans")
+    moment = insert_moment(
+        conn,
+        episode_id=ep["id"],
+        start_s=0.0,
+        end_s=40.0,
+        region={"x": 1, "y": 1, "w": 10, "h": 10},
+        whats_there="can",
+        score=0.5,
+    )
+    pl = upsert_placement(
+        conn, brand_id=brand["id"], moment_id=moment["id"], status="approved"
+    )
+    old = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    # update_placement always stamps updated_at, so set the stale clock directly.
+    conn.execute(
+        "UPDATE placements SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+        ("rendering", None, old, pl["id"]),
+    )
+    conn.commit()
+    blocked = upsert_placement(
+        conn, brand_id=brand["id"], moment_id=moment["id"], status="approved"
+    )
+    assert blocked.get("spawn") is False
+    assert blocked["status"] == "rendering"
+    # A second moment so the held key-missing row is a different placement.
+    moment2 = insert_moment(
+        conn,
+        episode_id=ep["id"],
+        start_s=1.0,
+        end_s=4.0,
+        region={"x": 2, "y": 2, "w": 8, "h": 8},
+        whats_there="glass",
+        score=0.4,
+    )
+    waiting = upsert_placement(
+        conn, brand_id=brand["id"], moment_id=moment2["id"], status="approved"
+    )
+    conn.execute(
+        "UPDATE placements SET status = ?, error = ?, updated_at = ? WHERE id = ?",
+        (
+            "queued",
+            "Generation queued: OpenRouter API key missing",
+            old,
+            waiting["id"],
+        ),
+    )
+    conn.commit()
+
+    from product_placement.catalog import list_placements
+
+    rows = {row["id"]: row for row in list_placements(conn, brand_id=brand["id"])}
+    assert rows[pl["id"]]["status"] == "failed"
+    assert "Approve again" in rows[pl["id"]]["error"]
+    assert rows[waiting["id"]]["status"] == "queued"
+    again = upsert_placement(
+        conn, brand_id=brand["id"], moment_id=moment["id"], status="approved"
+    )
+    assert again["status"] == "queued"
+    assert again.get("spawn") is True
+    # The row we just re-queued is fresh, so another list must not fail it.
+    fresh = {row["id"]: row for row in list_placements(conn, brand_id=brand["id"])}
+    assert fresh[pl["id"]]["status"] == "queued"
+
+
+def test_placement_heartbeat_keeps_rendering_fresh(catalog_env):
+    import time
+
+    conn, _data = catalog_env
+    title = create_title(conn, name="Beat Film", kind="movie", slug="beat-film")
+    vkey = catalog_video_key(title["slug"], 1, 1)
+    get_object_store().put_bytes(b"mp4", vkey, content_type="video/mp4")
+    ep = create_episode(
+        conn,
+        title_id=title["id"],
+        name="Pilot",
+        season=1,
+        episode=1,
+        video_key=vkey,
+        duration_s=10.0,
+        suggest_status="ready",
+    )
+    brand = create_brand(conn, name="Brand H", brief="cans")
+    moment = insert_moment(
+        conn,
+        episode_id=ep["id"],
+        start_s=0.0,
+        end_s=4.0,
+        region={"x": 1, "y": 1, "w": 4, "h": 4},
+        whats_there="mug",
+        score=0.5,
+    )
+    pl = upsert_placement(
+        conn, brand_id=brand["id"], moment_id=moment["id"], status="approved"
+    )
+    rendering = update_placement(conn, pl["id"], status="rendering", error=None)
+    from product_placement.jobs import start_placement_heartbeat
+
+    stop = start_placement_heartbeat(pl["id"], interval_s=0.05)
+    try:
+        time.sleep(0.4)
+        from product_placement.catalog import get_placement
+
+        fresh = get_placement(conn, id=pl["id"])
+        assert fresh["status"] == "rendering"
+        assert fresh["updated_at"] != rendering["updated_at"]
+    finally:
+        stop()
+
+
 def test_queued_with_error_can_retry_spawn(catalog_env):
     conn, data = catalog_env
     title = create_title(conn, name="Retry Film", kind="movie")

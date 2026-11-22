@@ -10,6 +10,7 @@ import { Button, ButtonLink } from "@/components/ui/button"
 import { Panel } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/empty-state"
 import { videoLabel } from "@/components/video-thumb"
+import { playbackEnd, playbackOrigin } from "@/lib/clip-window"
 import {
   decidePlacement,
   fmt,
@@ -123,14 +124,16 @@ export default function ReviewPage() {
   const list = useMemo(() => moments || [], [moments])
   const m = list[cur]
   const st = m ? statusOf(m) : "pending"
-  const clip = m && st === "ready" ? mediaUrl(placements[m.id]?.clip_key) : null
+  const placement = m ? placements[m.id] : undefined
+  const clip = m && st === "ready" ? mediaUrl(placement?.clip_key) : null
   const showClip = Boolean(clip) && !holding
+  const origin = m ? playbackOrigin(m.start_s, placement?.clip_start_s) : 0
   const episodeSrc = mediaUrl(video?.video_key)
   const dur = video?.duration_s || Math.max(1, ...list.map((x) => x.end_s))
 
   useEffect(() => {
     setPlaying(false)
-    if (m) setT(m.start_s)
+    if (m) setT(showClip ? origin : m.start_s)
   }, [m?.id, showClip]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -143,7 +146,7 @@ export default function ReviewPage() {
   function onTime() {
     const el = vidRef.current
     if (!el || !m) return
-    const now = showClip ? m.start_s + el.currentTime : el.currentTime
+    const now = showClip ? origin + el.currentTime : el.currentTime
     setT(now)
     if (!showClip && now >= m.end_s) {
       el.pause()
@@ -483,7 +486,8 @@ export default function ReviewPage() {
                         {i + 1}. {x.whats_there || "Spot"}
                       </b>
                       <small className="font-mono text-[11.5px] leading-[1.4] text-muted-foreground">
-                        {fmt(x.start_s)} – {fmt(x.end_s)}
+                        {fmt(playbackOrigin(x.start_s, placements[x.id]?.clip_start_s))} –{" "}
+                        {fmt(playbackEnd(x.end_s, placements[x.id]?.clip_end_s))}
                       </small>
                     </div>
                     <Badge variant={statusBadgeVariant(s)} className="ml-auto shrink-0">

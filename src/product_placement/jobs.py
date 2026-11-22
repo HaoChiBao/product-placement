@@ -200,11 +200,11 @@ def run_swap_job(
     chosen = resolve_swap_method(method)
     use_frame = mock_higgsfield_enabled() or chosen == "higgsfield"
     if use_frame:
-        from product_placement.crop_stitch import MAX_INPUT_S, estimate_frame_swap_cost_usd
+        from product_placement.crop_stitch import estimate_frame_swap_cost_usd
         from product_placement.frame_swap import clamp_i2v_duration
 
-        if duration > MAX_INPUT_S + 1e-3:
-            raise ValueError(f"input window {duration:.3f}s exceeds max {MAX_INPUT_S}s")
+        start_s, end_s = clamp_to_frame_cap(start_s, end_s)
+        duration = float(end_s) - float(start_s)
         estimated = estimate_frame_swap_cost_usd(float(clamp_i2v_duration(duration)))
         progress = "Extracting frame + editing for Seedance i2v"
     else:
@@ -348,6 +348,111 @@ def _claim_episode_suggest(conn, episode_id: str) -> bool:
     return int(rowcount) > 0
 
 
+STALE_PLACEMENT_S = 180.0
+HEARTBEAT_S = 20.0
+
+
+def _parse_stamp(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        seen = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if seen.tzinfo is None:
+        seen = seen.replace(tzinfo=timezone.utc)
+    return seen
+
+
+def fail_stale_placements(
+    conn, *, stale_s: float = STALE_PLACEMENT_S, now: datetime | None = None
+) -> int:
+    """Fail rendering/queued placements whose worker stopped updating.
+
+    A killed Wan job otherwise stays ``rendering`` and approve will not start
+    another. Queued rows that are holding for a missing key stay queued.
+    """
+    from datetime import timedelta
+
+    from product_placement.db import fetchall_dicts
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    cutoff = current - timedelta(seconds=float(stale_s))
+    rows = fetchall_dicts(
+        conn,
+        "SELECT id, status, error, updated_at, created_at FROM placements "
+        "WHERE status IN ('rendering', 'queued')",
+    )
+    failed = 0
+    message = "Generation stopped before it finished. Approve again to retry."
+    for row in rows:
+        if str(row.get("status") or "") == "queued" and str(row.get("error") or "").strip():
+            continue
+        stamp = _parse_stamp(row.get("updated_at") or row.get("created_at"))
+        if stamp is None or stamp >= cutoff:
+            continue
+        conn.execute(
+            "UPDATE placements SET status = ?, error = ?, updated_at = ? "
+            "WHERE id = ? AND status = ?",
+            ("failed", message, utc_now(), row["id"], row["status"]),
+        )
+        failed += 1
+    if failed:
+        conn.commit()
+    return failed
+
+
+def start_placement_heartbeat(
+    placement_id: str, *, interval_s: float = HEARTBEAT_S
+):
+    """Touch ``updated_at`` while a swap is rendering. Returns a stop function."""
+    import threading
+
+    stop = threading.Event()
+
+    def _beat() -> None:
+        while not stop.wait(interval_s):
+            conn = None
+            try:
+                from product_placement.db import get_connection
+
+                conn = get_connection()
+                conn.execute(
+                    "UPDATE placements SET updated_at = ? WHERE id = ? AND status = ?",
+                    (utc_now(), placement_id, "rendering"),
+                )
+                conn.commit()
+            except Exception:
+                pass
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+    thread = threading.Thread(
+        target=_beat, name=f"placement-hb-{placement_id[:8]}", daemon=True
+    )
+    thread.start()
+
+    def _stop() -> None:
+        stop.set()
+        thread.join(timeout=5)
+
+    return _stop
+
+
+def clamp_to_frame_cap(start_s: float, end_s: float) -> tuple[float, float]:
+    """Center a window on the 5s frame/Seedance cap. Wan clamps on its own max."""
+    from product_placement.crop_stitch import MAX_INPUT_S
+    from product_placement.openrouter_wan import clamp_window
+
+    return clamp_window(start_s, end_s, MAX_INPUT_S)
+
+
 def reset_stale_suggest_running(conn) -> int:
     """Crash recovery: flip abandoned 'running' rows back to queued (boot/seed)."""
     result = conn.execute(
@@ -484,6 +589,7 @@ def run_placement_swap_job(
 
     conn = get_connection()
     init_schema(conn)
+    stop_heartbeat = None
     try:
         placement = get_placement(conn, id=placement_id)
         if not placement:
@@ -517,6 +623,7 @@ def run_placement_swap_job(
             test_mode=1 if test_mode else 0,
             error=None,
         )
+        stop_heartbeat = start_placement_heartbeat(placement_id)
 
         store = get_object_store()
         with tempfile.TemporaryDirectory() as tmp:
@@ -553,13 +660,9 @@ def run_placement_swap_job(
             chosen = resolve_swap_method(method)
             use_frame = test_mode or mock_higgsfield_enabled() or chosen == "higgsfield"
             if use_frame:
-                from product_placement.crop_stitch import MAX_INPUT_S
                 from product_placement.frame_swap import run_frame_swap
 
-                if duration > MAX_INPUT_S + 1e-3:
-                    raise ValueError(
-                        f"input window {duration:.3f}s exceeds max {MAX_INPUT_S}s"
-                    )
+                start_s, end_s = clamp_to_frame_cap(start_s, end_s)
 
                 work = tmp_path / "frame_swap"
                 result_path = work / "clip.mp4"
@@ -679,6 +782,8 @@ def run_placement_swap_job(
             pass
         raise
     finally:
+        if stop_heartbeat is not None:
+            stop_heartbeat()
         conn.close()
 
 
