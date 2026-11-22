@@ -68,13 +68,22 @@ export function mediaUrl(key?: string | null): string | null {
 }
 
 export async function listVideos(): Promise<Video[]> {
-  const { titles } = await getJson<{ titles: Title[] }>("/api/catalog/titles")
+  // /api/catalog/titles defaults to watchable-only (ready episodes).
+  const { titles } = await getJson<{ titles: Title[] }>("/api/catalog/titles?watchable=1")
   const lists = await Promise.all(
     (titles || []).map(async (title) => {
       const { episodes } = await getJson<{ episodes: Episode[] }>(
         `/api/catalog/titles/${encodeURIComponent(title.id)}/episodes`
       )
-      return (episodes || []).map((ep) => ({ ...ep, title }))
+      return (episodes || [])
+        .filter((ep) => {
+          const st = (ep.suggest_status || "").toLowerCase()
+          const key = (ep.video_key || "").trim()
+          if (!key || key.startsWith("movies/")) return false
+          if (st === "processing" || st === "failed") return false
+          return true
+        })
+        .map((ep) => ({ ...ep, title }))
     })
   )
   return lists.flat()

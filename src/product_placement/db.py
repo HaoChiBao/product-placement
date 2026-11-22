@@ -162,7 +162,8 @@ CREATE TABLE IF NOT EXISTS episodes (
     poster_key TEXT,
     duration_s REAL,
     suggest_status TEXT,
-    created_at TEXT
+    created_at TEXT,
+    import_attempts INT DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS moments (
@@ -213,7 +214,26 @@ CREATE TABLE IF NOT EXISTS placements (
 
 def init_schema(conn: Connection) -> None:
     conn.executescript(_SCHEMA)
+    _ensure_column(conn, "episodes", "import_attempts", "INT DEFAULT 0")
     conn.commit()
+
+
+def _ensure_column(conn: Connection, table: str, column: str, decl: str) -> None:
+    cur = conn.cursor()
+    if conn.postgres:
+        cur.execute(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_name = ? AND column_name = ?",
+            (table, column),
+        )
+        if cur.fetchone():
+            return
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+        return
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = {row[1] for row in cur.fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def _brand_exists(conn: Connection, brand_id: str) -> bool:

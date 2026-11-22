@@ -16,14 +16,18 @@ from product_placement.catalog import (
     create_brand,
     create_episode,
     create_title,
+    episode_is_watchable,
     get_title,
     get_watch_payload,
     humanize_movie_filename,
     import_movies_from_store,
+    import_movies_with_lock,
     insert_moment,
+    list_episodes,
     list_moments,
     list_titles,
     migrate_catalog_object_keys,
+    movies_import_lock,
     register_preloaded_episode,
     seed_blender_open_movies,
     slugify,
@@ -611,8 +615,23 @@ def test_watchable_titles_hide_orphans_and_processing(catalog_env, tmp_path):
     watchable = list_titles(conn, watchable_only=True)
     assert [t["slug"] for t in watchable] == ["ready-film"]
 
+    failed = create_title(conn, name="Failed Film", kind="movie", slug="failed-film")
+    conn.execute(
+        "INSERT INTO episodes (id, title_id, season, episode_number, name, video_key, "
+        "poster_key, duration_s, suggest_status, created_at, import_attempts) "
+        "VALUES (?, ?, 1, 1, ?, ?, NULL, 0, 'failed', ?, 2)",
+        ("epfail01", failed["id"], "Failed Film", "movies/bad.mkv", "2020-01-01T00:00:00Z"),
+    )
+    conn.commit()
+    watchable = list_titles(conn, watchable_only=True)
+    assert [t["slug"] for t in watchable] == ["ready-film"]
+
     with pytest.raises(FileNotFoundError, match="episode not found"):
         get_watch_payload(conn, title_slug="orphan", season=1, episode=1)
+    with pytest.raises(FileNotFoundError, match="episode not found"):
+        get_watch_payload(conn, title_slug="processing", season=1, episode=1)
+    with pytest.raises(FileNotFoundError, match="episode not found"):
+        get_watch_payload(conn, title_slug="failed-film", season=1, episode=1)
 
 
 def test_seed_repairs_orphan_title(catalog_env, tmp_path):
@@ -724,3 +743,121 @@ def test_backfill_missing_posters(catalog_env, tmp_path):
 
     again = backfill_missing_posters(conn)
     assert again["updated_count"] == 0
+
+
+def test_episode_is_watchable_and_list_filters(catalog_env, tmp_path):
+    conn, data = catalog_env
+    title = create_title(conn, name="Filter Film", kind="movie", slug="filter-film")
+    video = tmp_path / "ok.mp4"
+    _write_color_mp4(video, color="blue", duration=1.0)
+    ready = create_episode(
+        conn,
+        title_id=title["id"],
+        name="Ready",
+        season=1,
+        episode=1,
+        video_path=video,
+        suggest_status="queued",
+    )
+    assert episode_is_watchable(ready)
+    assert list_episodes(conn, title_id=title["id"], watchable_only=True)
+
+    conn.execute(
+        "UPDATE episodes SET suggest_status = ?, video_key = ? WHERE id = ?",
+        ("processing", "movies/filter_film.mp4", ready["id"]),
+    )
+    conn.commit()
+    ep = list_episodes(conn, title_id=title["id"])[0]
+    assert not episode_is_watchable(ep)
+    assert list_episodes(conn, title_id=title["id"], watchable_only=True) == []
+
+
+def test_import_movies_retries_failed_until_max(catalog_env, tmp_path, monkeypatch):
+    conn, data = catalog_env
+    store = get_object_store()
+    video = tmp_path / "retry_me.mp4"
+    _write_color_mp4(video, color="red", duration=1.0)
+    store.put_file(video, "movies/retry_me.mp4", content_type="video/mp4")
+
+    calls = {"n": 0}
+
+    def boom(src, dest):
+        calls["n"] += 1
+        raise RuntimeError("transcode boom")
+
+    monkeypatch.setattr(
+        "product_placement.catalog.prepare_browser_mp4", boom
+    )
+    monkeypatch.setenv("IMPORT_MAX_ATTEMPTS", "2")
+
+    first = import_movies_from_store(conn)
+    assert first["imported"] == 0
+    assert first["failed"]
+    ep = list_episodes(conn, title_id=get_title(conn, slug="retry-me")["id"])[0]
+    assert ep["suggest_status"] == "failed"
+    assert int(ep["import_attempts"] or 0) == 1
+    assert not list_titles(conn, watchable_only=True)
+
+    second = import_movies_from_store(conn)
+    assert second["imported"] == 0
+    assert second["failed"]
+    ep = list_episodes(conn, title_id=get_title(conn, slug="retry-me")["id"])[0]
+    assert int(ep["import_attempts"] or 0) == 2
+
+    third = import_movies_from_store(conn)
+    assert third["imported"] == 0
+    assert third.get("skipped_max_attempts", 0) >= 1
+    assert calls["n"] == 2
+
+
+def test_import_movies_reuses_complete_etag_download(catalog_env, tmp_path, monkeypatch):
+    conn, data = catalog_env
+    store = get_object_store()
+    video = tmp_path / "etag_film.mp4"
+    _write_color_mp4(video, color="green", duration=1.0)
+    store.put_file(video, "movies/etag_film.mp4", content_type="video/mp4")
+
+    downloads = {"n": 0}
+    real_stream = __import__(
+        "product_placement.catalog", fromlist=["_stream_store_to_file"]
+    )._stream_store_to_file
+
+    def counted(store_obj, key, dest):
+        downloads["n"] += 1
+        return real_stream(store_obj, key, dest)
+
+    monkeypatch.setattr(
+        "product_placement.catalog._stream_store_to_file", counted
+    )
+
+    boom_once = {"n": 0}
+    real_prepare = __import__(
+        "product_placement.catalog", fromlist=["prepare_browser_mp4"]
+    ).prepare_browser_mp4
+
+    def flaky(src, dest):
+        boom_once["n"] += 1
+        if boom_once["n"] == 1:
+            # Leave the source download in place, fail the prepare.
+            raise RuntimeError("first prepare failed")
+        return real_prepare(src, dest)
+
+    monkeypatch.setattr("product_placement.catalog.prepare_browser_mp4", flaky)
+
+    first = import_movies_from_store(conn)
+    assert first["imported"] == 0
+    assert downloads["n"] == 1
+
+    second = import_movies_from_store(conn)
+    assert second["imported"] == 1
+    assert downloads["n"] == 1  # resumed same ETag download
+    assert list_titles(conn, watchable_only=True)
+
+
+def test_import_movies_lock_excludes_concurrent(catalog_env):
+    conn, data = catalog_env
+    with movies_import_lock(blocking=True) as held:
+        assert held
+        skipped = import_movies_with_lock(blocking=False, conn=conn)
+        assert skipped["skipped"] is True
+        assert skipped.get("reason") == "import already running"

@@ -19,7 +19,12 @@ export async function GET(
   try {
     ensureCatalogDb()
     const { id } = await ctx.params
-    const episodes = catalogCmd(["list-episodes", "--title-id", id])
+    const all = _req.nextUrl.searchParams.get("all")
+    const args = ["list-episodes", "--title-id", id]
+    if (!(all === "1" || all === "true")) {
+      args.push("--watchable")
+    }
+    const episodes = catalogCmd(args)
     return NextResponse.json({ episodes })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

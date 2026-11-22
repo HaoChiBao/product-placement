@@ -24,6 +24,17 @@ export function ensureCatalogDb(): void {
   catalogCmd(["init-db"])
 }
 
+/** Non-blocking: wake the import worker and kick a locked one-shot if needed. */
+export function wakeMoviesImport(): { wake: boolean; spawned: boolean } {
+  const wakePath = path.join(dataRoot(), "import-movies.wake")
+  fs.mkdirSync(path.dirname(wakePath), { recursive: true })
+  fs.writeFileSync(wakePath, new Date().toISOString() + "\n")
+  // Detached one-shot covers local/dev when the docker worker is not running.
+  // The flock makes concurrent worker + one-shot safe.
+  spawnJob(["-m", "product_placement.catalog", "import-movies", "--non-blocking"], {})
+  return { wake: true, spawned: true }
+}
+
 export function spawnEpisodeSuggest(episodeId: string): void {
   spawnJob(
     ["-m", "product_placement.jobs", "episode-suggest", "--episode-id", episodeId],
