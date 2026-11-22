@@ -1,10 +1,11 @@
 """Find, clean and rank product image candidates for a brand (all free; never raises).
 
-Sources, deduped by URL (max 6): the research agent's `image_url`, Shopify's
-`/products/<handle>.json`, and the page's image links (TinyFish Fetch
-`image_links`, best file-name match first). Each image is downloaded directly (image URLs are not
-sent to Fetch), checked, keyed to an RGBA PNG when it sits on a plain light
-background, ranked (CLIP when available), and the top 3 are saved.
+Sources, deduped by URL (max 8): the research agent's `image_url`, Shopify's
+`/products/<handle>.json`, and image links (TinyFish Fetch `image_links`, largest
+variant of each, best file-name match first) from the product page, the homepage
+and up to 2 product pages linked from them. Each image is downloaded directly
+(image URLs are not sent to Fetch), checked, keyed to an RGBA PNG when it sits on
+a plain light background, ranked (CLIP when available), and the top 3 are saved.
 """
 
 from __future__ import annotations
@@ -21,11 +22,16 @@ import cv2
 import httpx
 import numpy as np
 
-MAX_CANDIDATES = 6
+MAX_CANDIDATES = 8
 KEEP = 3
+EXTRA_PRODUCT_PAGES = 2
 DOWNLOAD_TIMEOUT_S = 15.0
 MAX_BYTES = 10 * 1024 * 1024
+# Opaque photos need a short side of 500 px. Images that already have
+# transparency are real packshots, and tall bottles are naturally narrow
+# (pepsi.ca serves 261×522), so those need a long side of 400 px instead.
 MIN_SHORT_SIDE = 500
+MIN_CUTOUT_LONG_SIDE = 400
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/jpg", "image/webp"}
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -98,24 +104,94 @@ def _link_url(item: Any) -> str:
     return str(item or "")
 
 
+_SCALE = re.compile(r"@(\d)x", re.I)  # pepsi@2x.png, pepsi@3x.png
+_BUILD_HASH = re.compile(r"\.[0-9a-f]{8,}$", re.I)  # webpack: pepsi@3x.15edcaad74db46f6b3d5
+_SHOPIFY_SIZE = re.compile(r"_(?:\d{2,4}x\d{0,4}|\d{0,4}x\d{2,4})$")  # tee_800x.jpg, tee_800x800.jpg
+_SIZE_PARAMS = {"width", "height"}
+
+
+def largest_variant(url: str) -> tuple[str, str, int]:
+    """(url for the biggest size, key shared by all sizes of this image, @Nx scale).
+
+    Drops Shopify size suffixes and `width`/`height` query params so the CDN
+    serves the original; `@2x`/`@3x` siblings share a key so the caller keeps
+    the larger one.
+    """
+    parsed = urlparse(url)
+    folder, _, filename = parsed.path.rpartition("/")
+    stem, dot, ext = filename.rpartition(".")
+    if not dot:
+        stem, ext = filename, ""
+    shopify = "shopify" in parsed.netloc or "/cdn/shop/" in parsed.path
+    if shopify:
+        stem = _SHOPIFY_SIZE.sub("", stem)
+    query = "&".join(
+        part
+        for part in parsed.query.split("&")
+        if part and part.split("=", 1)[0].lower() not in _SIZE_PARAMS
+    )
+    new_path = f"{folder}/{stem}{dot}{ext}"
+    new_url = parsed._replace(path=new_path, query=query).geturl()
+    m = _SCALE.search(stem)
+    scale = int(m.group(1)) if m else 1
+    key = f"{parsed.netloc}{folder}/{_SCALE.sub('', _BUILD_HASH.sub('', stem)).lower()}"
+    return new_url, key, scale
+
+
+def _name_stem(url: str) -> str:
+    stem = urlparse(url).path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    return _SCALE.sub("", _BUILD_HASH.sub("", stem))
+
+
 def rank_image_links(image_links: list[Any], base_url: str, product: str) -> list[Candidate]:
-    """Page image URLs, best product-name match first (logos and icons dropped).
+    """Page image URLs, largest variant only, best product-name match first (logos and icons dropped).
 
     Scores the file name: +1 per product word, -0.25 per other specific word, so
     `product_image_pepsi_zero_0.png` beats `pepsi_vanilla-cream_zero.png` for "Pepsi Zero".
     """
     want = _tokens(product)
-    scored: list[tuple[float, int, str]] = []
+    best: dict[str, tuple[int, int, str]] = {}  # key -> (scale, first index, url)
     for i, item in enumerate(image_links):
-        url = urljoin(base_url, _link_url(item))
-        stem = urlparse(url).path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
-        if not _usable_url(url) or _SKIP.search(stem):
+        raw = urljoin(base_url, _link_url(item))
+        if not _usable_url(raw) or _SKIP.search(_name_stem(raw)):
             continue
-        words = _tokens(stem) - _GENERIC
+        url, key, scale = largest_variant(raw)
+        prev = best.get(key)
+        if prev is None or scale > prev[0]:
+            best[key] = (scale, prev[1] if prev else i, url)
+    scored: list[tuple[float, int, str]] = []
+    for _, i, url in best.values():
+        words = _tokens(_name_stem(url)) - _GENERIC
         score = len(want & words) - 0.25 * len(words - want)
         scored.append((score, i, url))
     scored.sort(key=lambda t: (-t[0], t[1]))
     return [Candidate(url, "img", NAME_PRIOR * max(0.0, score)) for score, _, url in scored]
+
+
+_PRODUCT_PATH = re.compile(r"/(products?|p|item|items|shop)/", re.I)
+
+
+def product_page_links(
+    links: list[Any], base_url: str, product: str, exclude: set[str], limit: int
+) -> list[str]:
+    """Same-site product pages whose URL names the product, best match first."""
+    want = _tokens(product)
+    host = urlparse(base_url).netloc.lower().removeprefix("www.")
+    scored: list[tuple[int, int, str]] = []
+    seen = {u.rstrip("/") for u in exclude}
+    for i, item in enumerate(links):
+        url = urljoin(base_url, _link_url(item)).split("#")[0]
+        parsed = urlparse(url)
+        if parsed.netloc.lower().removeprefix("www.") != host or not _PRODUCT_PATH.search(parsed.path):
+            continue
+        if url.rstrip("/") in seen:
+            continue
+        hits = len(want & (_tokens(parsed.path) - _GENERIC))
+        if hits:
+            seen.add(url.rstrip("/"))
+            scored.append((hits, i, url))
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    return [url for _, _, url in scored[:limit]]
 
 
 def is_shopify(image_links: list[Any], text: str = "") -> bool:
@@ -190,7 +266,10 @@ def download_image(client: httpx.Client, url: str, referer: str) -> bytes | None
 
 
 def decode_image(data: bytes) -> np.ndarray | None:
-    """BGR or BGRA array with a short side ≥ 500 px, else None."""
+    """BGR or BGRA array, else None if it's too small.
+
+    Transparent images need a long side ≥ 400 px; opaque ones a short side ≥ 500 px.
+    """
     arr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_UNCHANGED)
     if arr is None or arr.ndim not in (2, 3):
         return None
@@ -198,7 +277,11 @@ def decode_image(data: bytes) -> np.ndarray | None:
         arr = cv2.convertScaleAbs(arr, alpha=255.0 / max(1.0, float(arr.max())))
     if arr.ndim == 2:
         arr = cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
-    if min(arr.shape[:2]) < MIN_SHORT_SIDE:
+    has_alpha = arr.shape[2] == 4 and int(arr[:, :, 3].min()) < 250
+    if has_alpha:
+        if max(arr.shape[:2]) < MIN_CUTOUT_LONG_SIDE:
+            return None
+    elif min(arr.shape[:2]) < MIN_SHORT_SIDE:
         return None
     return arr
 
@@ -280,37 +363,56 @@ def collect_candidates(
     agent_url: str | None,
     product_url: str | None,
 ) -> list[Candidate]:
-    """Agent URL, then Shopify JSON, then the page's image links; deduped, max 6.
+    """Agent URL, then Shopify JSON, then page image links; deduped, max 8.
 
-    `fetch(urls, links=True, image_links=True)` is TinyFish Fetch. Its HTML output
-    is cleaned text, so page images come from `image_links`, not from parsing tags.
+    Pages: the product page and the homepage in one Fetch, then up to 2 product
+    pages they link to whose URL names the product. `fetch(urls, links=True,
+    image_links=True)` is TinyFish Fetch; its HTML output is cleaned text, so
+    page images come from `image_links`, not from parsing tags.
     """
     found: list[Candidate] = []
     if agent_url and _usable_url(agent_url):
         found.append(Candidate(agent_url, "agent", AGENT_PRIOR))
 
-    page = product_url if (product_url or "").startswith("http") else site
-    page_cands: list[Candidate] = []
+    has_product_url = (product_url or "").startswith("http")
+    first = [u for u in dict.fromkeys([product_url if has_product_url else "", site]) if u]
+    image_urls: list[str] = []
+    page_links: list[tuple[str, list[Any]]] = []
+    page_text = ""
+
+    def read(urls: list[str]) -> None:
+        nonlocal page_text
+        result = fetch(urls, links=True, image_links=True)
+        for page in result.get("results") or []:
+            base = str(page.get("final_url") or page.get("url") or site)
+            image_urls.extend(urljoin(base, _link_url(i)) for i in page.get("image_links") or [])
+            page_links.append((base, page.get("links") or []))
+            page_text += str(page.get("text") or "")[:2000]
+
     try:
-        result = fetch([page], links=True, image_links=True)
-        pages = result.get("results") or []
-        if pages:
-            first = pages[0]
-            base = str(first.get("final_url") or page)
-            images = first.get("image_links") or []
-            page_cands = rank_image_links(images, base, product)
-            if is_shopify(images, str(first.get("text") or "")):
-                handle = shopify_handle(first.get("links") or [], product_url or base, product)
-                if handle:
-                    origin = f"{urlparse(base).scheme}://{urlparse(base).netloc}"
-                    # "html" returns the JSON body as-is; "markdown" escapes `_` in keys.
-                    js = fetch([f"{origin}/products/{handle}.json"], format="html")
-                    js_pages = js.get("results") or []
-                    if js_pages:
-                        found += parse_shopify_json(str(js_pages[0].get("text") or ""))
+        read(first)
+        extra: list[str] = []
+        fetched = set(first)
+        for base, links in page_links:
+            for url in product_page_links(links, base, product, fetched, EXTRA_PRODUCT_PAGES - len(extra)):
+                extra.append(url)
+                fetched.add(url)
+        if extra:
+            read(extra)
+        if is_shopify(image_urls, page_text):
+            all_links = [link for _, links in page_links for link in links]
+            base = page_links[0][0] if page_links else site
+            handle = shopify_handle(all_links, product_url or "", product)
+            if handle:
+                origin = f"{urlparse(base).scheme}://{urlparse(base).netloc}"
+                # "html" returns the JSON body as-is; "markdown" escapes `_` in keys.
+                js = fetch([f"{origin}/products/{handle}.json"], format="html")
+                js_pages = js.get("results") or []
+                if js_pages:
+                    found += parse_shopify_json(str(js_pages[0].get("text") or ""))
     except Exception:
         pass
-    found += page_cands
+    found += rank_image_links(image_urls, site, product)
 
     seen: set[str] = set()
     out: list[Candidate] = []

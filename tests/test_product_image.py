@@ -17,6 +17,8 @@ from product_placement.product_image import (
     decode_image,
     download_image,
     is_shopify,
+    largest_variant,
+    product_page_links,
     parse_shopify_json,
     rank,
     rank_image_links,
@@ -187,7 +189,7 @@ def test_collect_candidates_order_dedupe_and_shopify_fetch():
         ("img", "https://shop.test/hero.jpg"),
     ]
     assert calls == [
-        (["https://shop.test/products/runner"], {"links": True, "image_links": True}),
+        (["https://shop.test/products/runner", "https://shop.test"], {"links": True, "image_links": True}),
         (["https://shop.test/products/runner.json"], {"format": "html"}),
     ]
 
@@ -315,3 +317,73 @@ def test_same_image_on_two_hosts_is_kept_once(tmp_path: Path):
         clip=NoClip(),
     )
     assert [e["source"] for e in entries] == ["agent"]
+
+
+# ------------------------------------------------------- sizing, variants, more pages
+
+
+def _alpha_png(w: int, h: int) -> bytes:
+    img = np.zeros((h, w, 4), np.uint8)
+    img[h // 8 : -h // 8, w // 8 : -w // 8] = (20, 40, 200, 255)
+    return png_bytes(img)
+
+
+def test_transparent_packshots_use_long_side_opaque_use_short_side():
+    # pepsi.ca bottles: 261×522 @3x passes, 174×348 @2x doesn't.
+    assert decode_image(_alpha_png(261, 522)) is not None
+    assert decode_image(_alpha_png(174, 348)) is None
+    # The same size without transparency still needs a 500 px short side.
+    assert decode_image(png_bytes(packshot(261, 522))) is None
+    assert decode_image(png_bytes(packshot(500, 900))) is not None
+
+
+def test_largest_variant_keeps_3x_and_ignores_build_hash_in_name_score():
+    links = [
+        "https://www.pepsi.ca/static/media/PepsiLogo.82b6ee32c66958b07575b426f377def6.svg",
+        "https://www.pepsi.ca/static/media/pepsi@2x.ba5a0f26e34d8c10af14.png",
+        "https://www.pepsi.ca/static/media/diet-pepsi@2x.21a4ad7bcea9cc8d7403.png",
+        "https://www.pepsi.ca/static/media/pepsi@3x.15edcaad74db46f6b3d5.png",
+        "https://www.pepsi.ca/static/media/diet-pepsi@3x.3bd62dae6c710f203a35.png",
+    ]
+    urls = [c.url for c in rank_image_links(links, "https://www.pepsi.ca/", "pepsi bottle")]
+    assert urls == [
+        "https://www.pepsi.ca/static/media/pepsi@3x.15edcaad74db46f6b3d5.png",
+        "https://www.pepsi.ca/static/media/diet-pepsi@3x.3bd62dae6c710f203a35.png",
+    ]
+
+
+def test_largest_variant_strips_shopify_and_width_params():
+    url, _, _ = largest_variant("https://shop.test/cdn/shop/files/tee_800x.jpg?v=12&width=640")
+    assert url == "https://shop.test/cdn/shop/files/tee.jpg?v=12"
+    url, _, _ = largest_variant("https://cdn.shopify.com/s/files/1/a/tee_800x800.png")
+    assert url == "https://cdn.shopify.com/s/files/1/a/tee.png"
+    # Non-Shopify names keep their suffix; only width/height params go.
+    url, _, _ = largest_variant("https://brand.test/img/photo_800x.jpg?height=300&q=80")
+    assert url == "https://brand.test/img/photo_800x.jpg?q=80"
+
+
+def test_product_page_links_same_site_and_named():
+    links = [
+        "https://www.pepsi.ca/product/pepsi",
+        "https://www.pepsi.ca/product/diet-pepsi",
+        "https://www.pepsi.ca/about",
+        "https://other.test/product/pepsi",
+        "/product/pepsi-zero-sugar",
+    ]
+    got = product_page_links(links, "https://www.pepsi.ca/", "pepsi bottle", {"https://www.pepsi.ca"}, 2)
+    assert got == ["https://www.pepsi.ca/product/pepsi", "https://www.pepsi.ca/product/diet-pepsi"]
+
+
+def test_collect_candidates_reads_linked_product_pages():
+    calls: list[list[str]] = []
+
+    def fetch(urls, **kw):
+        calls.append(urls)
+        if urls == ["https://brand.test"]:
+            return {"results": [{"final_url": "https://brand.test/", "image_links": [],
+                                 "links": ["/products/zero-can", "/about"]}]}
+        return {"results": [{"final_url": urls[0], "image_links": ["/img/zero-can-front.png"], "links": []}]}
+
+    cands = collect_candidates(fetch, site="https://brand.test", product="Zero can", agent_url=None, product_url=None)
+    assert calls == [["https://brand.test"], ["https://brand.test/products/zero-can"]]
+    assert [c.url for c in cands] == ["https://brand.test/img/zero-can-front.png"]

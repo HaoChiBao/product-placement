@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Callable
 
 import httpx
@@ -18,6 +19,8 @@ from product_placement.research import (
     pick_official_site,
     to_brand_profile,
     write_cache,
+    read_cache,
+    cache_path,
 )
 
 ALLOWED_KEYWORDS = {
@@ -321,3 +324,15 @@ def test_to_brand_profile_splits_leaked_json_in_scene_lists():
         "Backyard BBQ with friends",
     ]
     assert profile["avoidScenes"] == ["Kids' birthday party"]
+
+
+def test_cache_without_image_url_is_stale(tmp_path, monkeypatch):
+    # Saved before the agent was asked for an image: re-run so it asks.
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    profile = to_brand_profile(OK_RESULT, "Pepsi", "pepsi.ca", "pepsi bottle")
+    path = cache_path("pepsi.ca", "pepsi bottle")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"saved_at": time.time(), "profile": profile}))
+    assert read_cache("pepsi.ca", "pepsi bottle") is None
+    write_cache("pepsi.ca", "pepsi bottle", profile, image_url=None)
+    assert read_cache("pepsi.ca", "pepsi bottle")["profile"] == profile
