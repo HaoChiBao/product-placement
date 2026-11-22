@@ -1,6 +1,8 @@
 /** Browser-side helpers for the /api/catalog routes plus the brand session kept in localStorage. */
 import type { BrandProfile } from "@/lib/research"
 
+export type VideoSource = "test" | "hosted" | "all"
+
 export type Title = {
   id: string
   name: string
@@ -9,6 +11,7 @@ export type Title = {
   synopsis?: string
   attribution?: string
   poster_key?: string | null
+  source?: "test" | "hosted" | string
 }
 
 export type Episode = {
@@ -67,9 +70,43 @@ export function mediaUrl(key?: string | null): string | null {
   return `/api/media/${key.split("/").map(encodeURIComponent).join("/")}`
 }
 
-export async function listVideos(): Promise<Video[]> {
+const VIDEO_SOURCE_KEY = "inset.videoSource"
+
+export function parseVideoSource(raw: string | null | undefined): VideoSource | null {
+  const v = (raw || "").trim().toLowerCase()
+  return v === "test" || v === "hosted" || v === "all" ? v : null
+}
+
+/** Query param → localStorage → null (API then uses VIDEO_SOURCE / all). */
+export function readVideoSource(): VideoSource | null {
+  if (typeof window === "undefined") return null
+  const fromQuery = parseVideoSource(new URLSearchParams(window.location.search).get("source"))
+  if (fromQuery) return fromQuery
+  try {
+    return parseVideoSource(window.localStorage.getItem(VIDEO_SOURCE_KEY))
+  } catch {
+    return null
+  }
+}
+
+export function writeVideoSource(source: VideoSource) {
+  try {
+    window.localStorage.setItem(VIDEO_SOURCE_KEY, source)
+  } catch {
+    /* storage blocked */
+  }
+  if (typeof window === "undefined") return
+  const url = new URL(window.location.href)
+  if (source === "all") url.searchParams.delete("source")
+  else url.searchParams.set("source", source)
+  window.history.replaceState({}, "", url.toString())
+}
+
+export async function listVideos(source?: VideoSource | null): Promise<Video[]> {
   // /api/catalog/titles defaults to watchable-only (ready episodes).
-  const { titles } = await getJson<{ titles: Title[] }>("/api/catalog/titles?watchable=1")
+  const q = new URLSearchParams({ watchable: "1" })
+  if (source) q.set("source", source)
+  const { titles } = await getJson<{ titles: Title[] }>(`/api/catalog/titles?${q}`)
   const lists = await Promise.all(
     (titles || []).map(async (title) => {
       const { episodes } = await getJson<{ episodes: Episode[] }>(

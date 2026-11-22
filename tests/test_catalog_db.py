@@ -101,6 +101,7 @@ def test_create_title_episode_moment_brand_placement(catalog_env, tmp_path):
         attribution="CC-BY Test",
     )
     assert title["slug"] == "demo-film"
+    assert title["source"] == "test"
     assert list_titles(conn)
 
     # Tiny fake video via ffmpeg color source
@@ -385,11 +386,13 @@ def test_seed_blender_mocked(catalog_env, tmp_path, monkeypatch):
     titles = list_titles(conn)
     bunny = next(t for t in titles if t["slug"] == "big-buck-bunny")
     assert bunny["poster_key"] == "catalog/big-buck-bunny/poster.jpg"
+    assert bunny["source"] == "test"
     steel = next(t for t in titles if t["slug"] == "tears-of-steel")
     assert steel["poster_key"] == "catalog/tears-of-steel/poster.jpg"
     assert all(
         (t.get("attribution") or "").startswith("CC-BY") for t in titles if t["slug"]
     )
+    assert all(t.get("source") == "test" for t in titles)
 
     # Second call without force creates nothing new (but does not hard-bail early).
     again = seed_blender_open_movies(conn, force=False, download_fn=fake_download)
@@ -453,6 +456,7 @@ def test_import_movies_from_local_object_store(catalog_env, tmp_path):
     title = get_title(conn, slug="the-matrix")
     assert title is not None
     assert title["kind"] == "movie"
+    assert title["source"] == "hosted"
     assert title["poster_key"]
     assert store.exists(title["poster_key"])
 
@@ -460,6 +464,63 @@ def test_import_movies_from_local_object_store(catalog_env, tmp_path):
     assert again["imported"] == 0
     assert again["skipped_existing"] >= 1
     assert again["skipped"] is True
+
+
+def test_list_titles_filters_by_source(catalog_env, tmp_path, monkeypatch):
+    conn, data = catalog_env
+    create_title(conn, name="Blender Demo", kind="movie", slug="blender-demo", source="test")
+    create_title(
+        conn,
+        name="Home Alone 2",
+        kind="movie",
+        slug="home-alone-2",
+        synopsis="Imported from movies/home_alone_2.mp4",
+        source="hosted",
+    )
+    assert [t["slug"] for t in list_titles(conn, source="test")] == ["blender-demo"]
+    assert [t["slug"] for t in list_titles(conn, source="hosted")] == ["home-alone-2"]
+    assert {t["slug"] for t in list_titles(conn, source="all")} == {
+        "blender-demo",
+        "home-alone-2",
+    }
+    monkeypatch.setenv("VIDEO_SOURCE", "hosted")
+    assert [t["slug"] for t in list_titles(conn)] == ["home-alone-2"]
+    monkeypatch.delenv("VIDEO_SOURCE", raising=False)
+    assert {t["slug"] for t in list_titles(conn)} == {"blender-demo", "home-alone-2"}
+
+
+def test_title_source_backfill_from_synopsis(catalog_env):
+    conn, data = catalog_env
+    conn.execute(
+        "INSERT INTO titles (id, kind, name, slug, synopsis, poster_key, attribution, created_at) "
+        "VALUES (?, ?, ?, ?, ?, NULL, '', ?)",
+        (
+            "legacyhost01",
+            "movie",
+            "Obsession",
+            "obsession",
+            "Imported from movies/obsession.mp4",
+            "2020-01-01T00:00:00Z",
+        ),
+    )
+    conn.execute(
+        "INSERT INTO titles (id, kind, name, slug, synopsis, poster_key, attribution, created_at) "
+        "VALUES (?, ?, ?, ?, ?, NULL, '', ?)",
+        (
+            "legacytest01",
+            "movie",
+            "Sintel",
+            "sintel",
+            "A Blender open movie",
+            "2020-01-01T00:00:00Z",
+        ),
+    )
+    conn.commit()
+    init_schema(conn)
+    hosted = get_title(conn, slug="obsession")
+    test = get_title(conn, slug="sintel")
+    assert hosted is not None and hosted["source"] == "hosted"
+    assert test is not None and test["source"] == "test"
 
 
 def test_import_movies_remuxes_mkv_and_transcodes_mpeg4(catalog_env, tmp_path):
