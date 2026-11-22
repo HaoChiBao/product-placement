@@ -1972,6 +1972,13 @@ def _placement_items(payload: Any) -> list[Any]:
     raise ValueError("expected a list of placements")
 
 
+def _blank_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 def _parse_placement_item(item: Any) -> dict[str, Any]:
     if not isinstance(item, dict):
         raise ValueError("expected a placement object")
@@ -2012,6 +2019,8 @@ def _parse_placement_item(item: Any) -> dict[str, Any]:
         "clip_key": clip_key,
         "cost_usd": cost_usd,
         "region": region,
+        "version_label": _blank_text(item.get("version_label")),
+        "slot_key": _blank_text(item.get("slot_key")),
     }
 
 
@@ -2029,8 +2038,9 @@ def _finish_imported_placement(
     start_s: float,
     end_s: float,
     cost_usd: float,
+    version_label: str | None,
+    slot_key: str | None,
 ) -> dict[str, Any]:
-    """Same fields the Wan render writes once a placement is finished."""
     return update_placement(
         conn,
         placement_id,
@@ -2042,14 +2052,17 @@ def _finish_imported_placement(
         cost_usd=cost_usd,
         clip_start_s=start_s,
         clip_end_s=end_s,
+        version_label=version_label,
+        slot_key=slot_key,
     )
 
 
 def import_finished_placements(conn: Connection, payload: Any) -> dict[str, Any]:
     """Create or update ready placements for already-uploaded swap clips.
 
-    Identity is episode_id + start_s + brand name. The clip key is stored as
-    clip_key, which /watch plays across clip_start_s..clip_end_s.
+    Identity is episode_id + start_s (within 1ms) + brand + version_label.
+    A blank version_label matches unlabeled rows. slot_key is stored and is
+    not part of identity.
     """
     parsed = [_parse_placement_item(item) for item in _placement_items(payload)]
     for item in parsed:
@@ -2072,6 +2085,7 @@ def import_finished_placements(conn: Connection, payload: Any) -> dict[str, Any]
                 row
                 for row in rows
                 if abs(_window_start(row) - item["start_s"]) <= PLACEMENT_START_MATCH_S
+                and _blank_text(row.get("version_label")) == item["version_label"]
             ),
             None,
         )
@@ -2094,6 +2108,8 @@ def import_finished_placements(conn: Connection, payload: Any) -> dict[str, Any]
                 start_s=item["start_s"],
                 end_s=item["end_s"],
                 cost_usd=item["cost_usd"],
+                version_label=item["version_label"],
+                slot_key=item["slot_key"],
             )
             action = "updated"
         else:
@@ -2136,6 +2152,8 @@ def import_finished_placements(conn: Connection, payload: Any) -> dict[str, Any]
                 start_s=item["start_s"],
                 end_s=item["end_s"],
                 cost_usd=item["cost_usd"],
+                version_label=item["version_label"],
+                slot_key=item["slot_key"],
             )
             action = "created"
         refresh_campaign_for_placement(conn, row["id"])
@@ -2400,7 +2418,7 @@ def get_watch_payload(
     if brand_id:
         sql += " AND p.brand_id = ?"
         params.append(brand_id)
-    sql += " ORDER BY m.start_s"
+    sql += " ORDER BY m.start_s, p.created_at, p.id"
     rows = fetchall_dicts(conn, sql, params)
     for r in rows:
         clip_key = r.get("clip_key")
@@ -2423,6 +2441,8 @@ def get_watch_payload(
                 "region": json.loads(r["region_json"]) if r.get("region_json") else None,
                 "whats_there": r.get("whats_there"),
                 "brand_name": r.get("brand_name") or "",
+                "version_label": _blank_text(r.get("version_label")),
+                "slot_key": _blank_text(r.get("slot_key")),
                 "backend": r.get("backend"),
             }
         )

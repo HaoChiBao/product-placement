@@ -41,6 +41,48 @@ test("sample windows sit at their episode timestamps", () => {
   assert.equal(boxes[1].brand, "AT&T")
 })
 
+test("merges overlapping versions into one marker with a count", () => {
+  const [tick] = placementTickBoxes(
+    [
+      { id: "ha-2", brand: "Daisy", start_s: 107.87, end_s: 113.87 },
+      { id: "ha-3", brand: "Swiss Miss", start_s: 107.87, end_s: 113.87 },
+    ],
+    145.45
+  )
+  assert.equal(tick.count, 2)
+  assert.equal(tick.brand, "Daisy, Swiss Miss")
+  assert.equal(tick.label, "Daisy, Swiss Miss · 2")
+  assert.equal(tick.spanned, true)
+  assert.ok(Math.abs(tick.leftPct - (107.87 / 145.45) * 100) < 1e-9)
+  assert.ok(Math.abs(tick.widthPct - (6 / 145.45) * 100) < 1e-9)
+})
+
+test("merges windows that touch and keeps a gap split", () => {
+  const touching = placementTickBoxes(
+    [
+      { id: "a", brand: "Coke", start_s: 10, end_s: 20 },
+      { id: "b", brand: "Coke", start_s: 20, end_s: 30 },
+    ],
+    100
+  )
+  assert.equal(touching.length, 1)
+  assert.equal(touching[0].leftPct, 10)
+  assert.equal(touching[0].widthPct, 20)
+  assert.equal(touching[0].count, 2)
+  assert.equal(touching[0].label, "Coke · 2")
+
+  const gapped = placementTickBoxes(
+    [
+      { id: "a", brand: "Coke", start_s: 10, end_s: 20 },
+      { id: "b", brand: "Pepsi", start_s: 20.05, end_s: 30 },
+    ],
+    100
+  )
+  assert.equal(gapped.length, 2)
+  assert.equal(gapped[0].count, 1)
+  assert.equal(gapped[1].brand, "Pepsi")
+})
+
 test("clamps to the episode and skips an unknown duration", () => {
   const [tick] = placementTickBoxes(
     [{ id: "over", brand: " 3M Post-it ", start_s: -2, end_s: 500 }],

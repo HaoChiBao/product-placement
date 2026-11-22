@@ -3,6 +3,16 @@
 import { useEffect, useRef, useState } from "react"
 
 import { placementTickBoxes } from "@/lib/placement-ticks"
+import {
+  VERSION_CHOICE_STORAGE_KEY,
+  choiceStorageId,
+  choicesForScope,
+  groupPlacementSlots,
+  readVersionChoices,
+  versionAtTime,
+  versionChipLabel,
+  writeVersionChoice,
+} from "@/lib/placement-slots"
 import { cn } from "@/lib/utils"
 
 export type PlacementWindow = {
@@ -10,7 +20,10 @@ export type PlacementWindow = {
   start_s: number
   end_s: number
   clip_url: string | null
+  brand_id?: string | null
   brand_name?: string | null
+  version_label?: string | null
+  slot_key?: string | null
 }
 
 type Props = {
@@ -18,6 +31,8 @@ type Props = {
   posterUrl?: string | null
   placements: PlacementWindow[]
   durationS?: number | null
+  brandId?: string | null
+  choiceScope?: string
 }
 
 function formatClock(seconds: number) {
@@ -27,12 +42,56 @@ function formatClock(seconds: number) {
   return `${m}:${s.toString().padStart(2, "0")}`
 }
 
+function paintOverlay(
+  main: HTMLVideoElement,
+  overlay: HTMLVideoElement,
+  hit: Pick<PlacementWindow, "id" | "clip_url" | "start_s"> | null,
+  activeClip: { current: string | null }
+) {
+  if (!hit?.clip_url) {
+    overlay.style.opacity = "0"
+    if (!overlay.paused) overlay.pause()
+    activeClip.current = null
+    return
+  }
+  const local = Math.max(0, main.currentTime - hit.start_s)
+  const token = `${hit.id}\n${hit.clip_url}`
+  if (activeClip.current !== token) {
+    activeClip.current = token
+    overlay.src = hit.clip_url
+    try {
+      overlay.currentTime = local
+    } catch {
+      /* seek race */
+    }
+  } else if (Math.abs((overlay.currentTime || 0) - local) > 0.3) {
+    try {
+      overlay.currentTime = local
+    } catch {
+      /* seek race */
+    }
+  }
+  overlay.style.opacity = "1"
+  if (main.paused) {
+    if (!overlay.paused) overlay.pause()
+  } else if (overlay.paused) {
+    overlay.play().catch(() => {})
+  }
+}
+
 /**
  * Overlay approach: play the source episode, and during each ready placement
  * window swap in a synced overlay <video>. Chosen over full-episode pre-stitch
  * because placements are per-brand; stitching would need one rendition per brand.
  */
-export function PlacementPlayer({ videoUrl, posterUrl, placements, durationS }: Props) {
+export function PlacementPlayer({
+  videoUrl,
+  posterUrl,
+  placements,
+  durationS,
+  brandId,
+  choiceScope = "",
+}: Props) {
   const shellRef = useRef<HTMLDivElement>(null)
   const mainRef = useRef<HTMLVideoElement>(null)
   const overlayRef = useRef<HTMLVideoElement>(null)
@@ -42,9 +101,31 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements, durationS }: 
   const [muted, setMuted] = useState(false)
   const [time, setTime] = useState(0)
   const [duration, setDuration] = useState(durationS && durationS > 0 ? durationS : 0)
+  const [choice, setChoice] = useState<Record<string, string>>({})
+  const choiceRef = useRef(choice)
+  choiceRef.current = choice
   const activeClip = useRef<string | null>(null)
+  const syncOverlayRef = useRef(() => {})
   const readyCount = placements.filter((p) => p.clip_url).length
   const knownDuration = duration > 0 ? duration : durationS && durationS > 0 ? durationS : 0
+  const slots = groupPlacementSlots(placements)
+  const scopedChoice = choicesForScope(choice, choiceScope)
+  const active = versionAtTime(slots, time, scopedChoice, brandId)
+  const options = active?.options ?? []
+  syncOverlayRef.current = () => {
+    const main = mainRef.current
+    const overlay = overlayRef.current
+    if (!main || !overlay) return
+    const hit = showPlaced
+      ? versionAtTime(
+          slots,
+          main.currentTime,
+          choicesForScope(choiceRef.current, choiceScope),
+          brandId
+        )?.version ?? null
+      : null
+    paintOverlay(main, overlay, hit, activeClip)
+  }
   const ticks = placementTickBoxes(
     placements.map((placement) => ({
       id: placement.id,
@@ -63,40 +144,18 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements, durationS }: 
 
     let raf = 0
     const tick = () => {
-      const t = main.currentTime
-      const hit =
-        showPlaced &&
-        placements.find((p) => p.clip_url && t >= p.start_s && t < p.end_s)
-
-      if (!hit || !hit.clip_url) {
-        overlay.style.opacity = "0"
-        if (!overlay.paused) overlay.pause()
-        activeClip.current = null
-      } else {
-        const local = Math.max(0, t - hit.start_s)
-        if (activeClip.current !== hit.clip_url) {
-          activeClip.current = hit.clip_url
-          overlay.src = hit.clip_url
-        }
-        overlay.style.opacity = "1"
-        if (Math.abs(overlay.currentTime - local) > 0.3) {
-          try {
-            overlay.currentTime = local
-          } catch {
-            /* seek race */
-          }
-        }
-        if (main.paused) {
-          if (!overlay.paused) overlay.pause()
-        } else if (overlay.paused) {
-          overlay.play().catch(() => {})
-        }
-      }
+      syncOverlayRef.current()
       raf = window.requestAnimationFrame(tick)
     }
     raf = window.requestAnimationFrame(tick)
     return () => window.cancelAnimationFrame(raf)
-  }, [placements, showPlaced])
+  }, [])
+
+  useEffect(() => {
+    const next = readVersionChoices(window.sessionStorage.getItem(VERSION_CHOICE_STORAGE_KEY))
+    choiceRef.current = next
+    setChoice(next)
+  }, [])
 
   useEffect(() => {
     const main = mainRef.current
@@ -166,6 +225,29 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements, durationS }: 
     }
   }
 
+  function chooseVersion(slotId: string, placementId: string) {
+    const next = writeVersionChoice(
+      choiceRef.current,
+      choiceStorageId(choiceScope, slotId),
+      placementId
+    )
+    choiceRef.current = next
+    setChoice(next)
+    try {
+      window.sessionStorage.setItem(VERSION_CHOICE_STORAGE_KEY, JSON.stringify(next))
+    } catch {
+      /* storage unavailable */
+    }
+    syncOverlayRef.current()
+  }
+
+  function stepVersion(delta: number) {
+    if (!active || options.length < 2) return
+    const index = options.findIndex((version) => version.id === active.version.id)
+    const next = options[(index + delta + options.length) % options.length]
+    chooseVersion(active.slot.id, next.id)
+  }
+
   return (
     <div
       ref={shellRef}
@@ -197,6 +279,51 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements, durationS }: 
           >
             <PlayIcon className="ml-0.5 size-6" />
           </button>
+        ) : null}
+        {showPlaced && active && options.length > 1 ? (
+          <div
+            className="absolute bottom-24 left-3 z-[7] flex max-w-[min(68%,26rem)] items-center gap-0.5 rounded-full border border-white/20 bg-black/75 p-1 text-white shadow-[0_8px_24px_rgba(0,0,0,0.45)] backdrop-blur-sm"
+            role="group"
+            aria-label="Ad versions"
+          >
+            <button
+              type="button"
+              className="grid size-6 shrink-0 place-items-center rounded-full text-[15px] leading-none text-white/80 hover:bg-white/10"
+              aria-label="Previous version"
+              onClick={() => stepVersion(-1)}
+            >
+              ‹
+            </button>
+            <div className="flex gap-1 overflow-x-auto">
+              {options.map((version) => {
+                const selected = version.id === active.version.id
+                return (
+                  <button
+                    key={version.id}
+                    type="button"
+                    aria-pressed={selected}
+                    className={cn(
+                      "shrink-0 rounded-full px-2.5 py-1 text-[11px] leading-none",
+                      selected
+                        ? "bg-white font-semibold text-black"
+                        : "text-white/75 hover:bg-white/10"
+                    )}
+                    onClick={() => chooseVersion(active.slot.id, version.id)}
+                  >
+                    {versionChipLabel(version)}
+                  </button>
+                )
+              })}
+            </div>
+            <button
+              type="button"
+              className="grid size-6 shrink-0 place-items-center rounded-full text-[15px] leading-none text-white/80 hover:bg-white/10"
+              aria-label="Next version"
+              onClick={() => stepVersion(1)}
+            >
+              ›
+            </button>
+          </div>
         ) : null}
       </div>
 
@@ -260,7 +387,7 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements, durationS }: 
         </div>
         <div
           ref={barRef}
-          className="relative flex h-3 cursor-pointer items-center"
+          className="relative flex h-6 cursor-pointer items-center"
           role="slider"
           aria-label="Video progress"
           aria-valuemin={0}
@@ -293,11 +420,17 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements, durationS }: 
             <button
               key={tick.id}
               type="button"
-              aria-label={tick.brand ? `${tick.brand} placement` : "Placement"}
-              className="group/tick absolute top-1/2 z-[1] h-4 -translate-y-1/2 border-0 bg-transparent p-0"
+              aria-label={
+                tick.count > 1
+                  ? `${tick.brand || "Placement"} ${tick.count} versions`
+                  : tick.brand
+                    ? `${tick.brand} placement`
+                    : "Placement"
+              }
+              className="group/tick absolute top-1/2 z-[1] h-6 -translate-y-1/2 border-0 bg-transparent p-0"
               style={{
-                left: tick.spanned ? `${tick.leftPct}%` : `calc(${tick.leftPct}% - 6px)`,
-                width: tick.spanned ? `${tick.widthPct}%` : 14,
+                left: tick.spanned ? `${tick.leftPct}%` : `calc(${tick.leftPct}% - 7px)`,
+                width: tick.spanned ? `${tick.widthPct}%` : 16,
               }}
               onPointerDown={(event) => event.stopPropagation()}
               onClick={(event) => {
@@ -311,13 +444,18 @@ export function PlacementPlayer({ videoUrl, posterUrl, placements, durationS }: 
             >
               <span
                 className={cn(
-                  "pointer-events-none absolute top-1/2 h-[3px] -translate-y-1/2 rounded-[1px] bg-accent shadow-[0_0_0_1px_rgba(0,0,0,0.45)]",
-                  tick.spanned ? "inset-x-0" : "left-1/2 w-0.5 -translate-x-1/2"
+                  "pointer-events-none absolute top-1/2 h-2.5 -translate-y-1/2 rounded-[2px] bg-[#ff2a33] shadow-[0_0_0_1px_#141414,0_0_0_2px_#fff]",
+                  tick.spanned ? "inset-x-0" : "left-1/2 w-1.5 -translate-x-1/2"
                 )}
               />
-              {tick.brand ? (
-                <span className="pointer-events-none absolute bottom-[calc(100%+6px)] left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded-sm border border-white/15 bg-black/85 px-1.5 py-0.5 text-[10px] font-medium text-white group-hover/tick:block group-focus-visible/tick:block">
-                  {tick.brand}
+              {tick.count > 1 ? (
+                <span className="pointer-events-none absolute left-0 top-1/2 z-10 grid h-4 min-w-4 -translate-y-1/2 place-items-center rounded-full border border-black bg-white px-1 text-[10px] font-bold leading-none text-black">
+                  {tick.count}
+                </span>
+              ) : null}
+              {tick.label ? (
+                <span className="pointer-events-none absolute bottom-[calc(100%+6px)] left-1/2 z-10 hidden -translate-x-1/2 whitespace-nowrap rounded-sm border border-white/20 bg-black/90 px-1.5 py-0.5 text-[10px] font-medium text-white group-hover/tick:block group-focus-visible/tick:block">
+                  {tick.label}
                 </span>
               ) : null}
             </button>
