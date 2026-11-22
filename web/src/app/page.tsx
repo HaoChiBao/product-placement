@@ -9,6 +9,7 @@ import { TextureButton } from "@/components/ui/texture-button"
 import { TextureCard, TextureCardContent } from "@/components/ui/texture-card"
 import { Field, Input, Label, Textarea } from "@/components/ui/input"
 import { PageShell } from "@/components/ui/page-shell"
+import { getFlow, researchDone, researchHref, sameInput, setFlow, type Flow } from "@/lib/flow"
 import { research, type ResearchInput } from "@/lib/research"
 import { setPendingAsset } from "@/lib/pending-asset"
 
@@ -18,6 +19,16 @@ export default function OnboardPage() {
   const [asset, setAsset] = useState<File | null>(null)
   const [preview, setPreview] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  // Coming back from a later step: show what was entered. Unchanged input
+  // reopens the finished research; any edit starts a new run.
+  const [prev, setPrev] = useState<Flow | null>(null)
+  useEffect(() => {
+    const flow = getFlow()
+    if (!flow) return
+    setPrev(flow)
+    setForm(flow.input)
+  }, [])
+  const reopen = Boolean(prev && researchDone(prev) && sameInput(prev.input, form))
 
   useEffect(() => {
     if (!asset) return setPreview(null)
@@ -29,6 +40,11 @@ export default function OnboardPage() {
   function submit(e: React.FormEvent) {
     e.preventDefault()
     setPendingAsset(asset)
+    if (prev && reopen) {
+      router.push(researchHref(prev))
+      return
+    }
+    setFlow({ input: form })
     const q = new URLSearchParams(form as Record<string, string>)
     router.push(`/research?${q}`)
   }
@@ -127,8 +143,13 @@ export default function OnboardPage() {
                 <Textarea id="o-note" rows={2} value={form.note} onChange={set("note")} />
               </Field>
               <TextureButton type="submit" variant="primary" size="lg" className="mt-1">
-                Research my brand →
+                {reopen ? "See your research →" : "Research my brand →"}
               </TextureButton>
+              {prev && researchDone(prev) && !reopen ? (
+                <p className="text-center text-[12px] text-muted-foreground">
+                  You changed your details, so we’ll research your brand again.
+                </p>
+              ) : null}
             </form>
             </TextureCardContent>
           </TextureCard>

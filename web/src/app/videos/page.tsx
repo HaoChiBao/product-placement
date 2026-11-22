@@ -15,7 +15,6 @@ import {
   MorphingDialogTrigger,
 } from "@/components/motion-primitives/morphing-dialog"
 import { TopBar } from "@/components/top-bar"
-import { Badge, StatusDot } from "@/components/ui/badge"
 import { Button, ButtonLink } from "@/components/ui/button"
 import { EmptyState, Skeleton } from "@/components/ui/empty-state"
 import { PageHeader, PageShell } from "@/components/ui/page-shell"
@@ -31,6 +30,19 @@ import {
   type CatalogMoment,
   type Video,
 } from "@/lib/catalog-client"
+
+/** Hide the auto-generated "Imported from movies/…" synopsis. */
+const synopsis = (v: Video) => (/^imported from /i.test(v.title.synopsis || "") ? "" : v.title.synopsis || "")
+
+/** Second line under the title; empty when it would just repeat the title. */
+function subtitle(v: Video): string {
+  const title = v.title.name.trim().toLowerCase()
+  if (v.title.kind === "series") {
+    const ep = v.name.trim()
+    return ep && ep.toLowerCase() !== title ? ep : ""
+  }
+  return v.title.attribution?.trim() || ""
+}
 
 function initials(s: string) {
   return s
@@ -161,17 +173,16 @@ function VideoCard({ v }: { v: Video }) {
           </span>
           <div className="min-w-0 flex-1">
             <div className="line-clamp-2 font-semibold leading-snug">{label(v)}</div>
+            {subtitle(v) ? (
+              <div className="mt-0.5 truncate text-[12.5px] text-muted-foreground">{subtitle(v)}</div>
+            ) : null}
             <div className="mt-0.5 text-[12.5px] text-muted-foreground">
-              {v.title.kind === "series" ? v.name : v.title.attribution || v.name}
-            </div>
-            <div className="mt-1.5">
+              {v.title.kind === "series" ? "Series" : "Film"}
+              <span className="px-1 text-faint">·</span>
               {isScanned(v) ? (
-                <Badge>
-                  <StatusDot />
-                  Scanned
-                </Badge>
+                "Spots ready"
               ) : (
-                <Badge variant="warning">Scanning…</Badge>
+                <span className="text-warning">Scanning for spots…</span>
               )}
             </div>
           </div>
@@ -218,7 +229,7 @@ function VideoDetail({ v }: { v: Video }) {
           {label(v)}
         </MorphingDialogTitle>
         <MorphingDialogDescription className="mt-0" disableLayoutAnimation>
-          {v.title.synopsis ? <p className="mt-1.5 text-muted-foreground">{v.title.synopsis}</p> : null}
+          {synopsis(v) ? <p className="mt-1.5 text-muted-foreground">{synopsis(v)}</p> : null}
           {v.title.attribution ? <p className="mt-1.5 text-[12.5px] text-muted-foreground">{v.title.attribution}</p> : null}
         </MorphingDialogDescription>
       </div>
@@ -279,8 +290,7 @@ function VideoDetail({ v }: { v: Video }) {
           )
         })}
       </div>
-      <div className="sticky bottom-0 -mb-6 flex flex-wrap items-center justify-between gap-3 border-t border-border bg-card py-3.5 pb-6">
-        <span className="text-[12.5px] text-muted-foreground">No faces are edited. You approve every placement.</span>
+      <div className="sticky bottom-0 -mb-6 flex flex-wrap items-center justify-end gap-3 border-t border-border bg-card py-3.5 pb-6">
         {usable.length ? (
           <ButtonLink variant="primary" size="lg" href={`/review/${v.title_id}/${v.id}`}>
             Review placements →
