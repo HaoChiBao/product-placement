@@ -34,8 +34,8 @@ Open http://localhost:$PORT (default **3000**). Railway injects `$PORT` automati
 | `AWS_S3_BUCKET_NAME` + `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` | no | S3 (or S3-compatible) object store; else local `$DATA_DIR/objects/` |
 | `AWS_ENDPOINT_URL_S3` | no | Custom S3 endpoint (Railway bucket) |
 | `AWS_DEFAULT_REGION` | no | S3 region (default `us-east-1`) |
-| `OPENROUTER_API_KEY` | no | When set, suggest uses Jev on OpenRouter. Unset keeps the classical CV finder |
-| `MOMENT_MODEL` | no | OpenRouter model (default `typesafe/jev-router`) |
+| `OPENROUTER_API_KEY` | no | When set, suggest uses Gemini on OpenRouter. Unset keeps the classical CV finder |
+| `MOMENT_MODEL` | no | OpenRouter model (default `google/gemini-3.8-flash`) |
 | `TINYFISH_API_KEY` | no | TinyFish key for `/research`: web search, page fetch and one paid agent run (~$0.016/step) per brand; without it the research page falls back to the mock |
 
 Auth is resolved by `product_placement.higgsfield.auth_header`: prefer `HF_KEY`, else `HF_API_KEY_ID` + `HF_API_KEY_SECRET`.
@@ -88,7 +88,7 @@ API routes spawn `python3 -m product_placement.jobs …` (uses `PYTHON_BIN` if s
 
 `suggest(video_path, n=5) -> list[Moment]` returns 3–5 spread-out windows with a placement box (`x, y, w, h`), a still frame, and a short reason.
 
-When `OPENROUTER_API_KEY` is set, suggest samples the video at 1 fps (`ffmpeg`), tiles the frames onto labelled contact sheets (up to 1568 px, tiles `T01`…), and asks TypeSafe's Jev model on OpenRouter which tiles are steady, face-clear product-placement moments. The top candidates are checked again on a full frame: a presence gate, then a box as fractions of the frame, converted to pixels. Progress goes to stderr. `MOMENT_MODEL` overrides the model (default `typesafe/jev-router`).
+When `OPENROUTER_API_KEY` is set, suggest detects shots, takes about one full-resolution keyframe per second inside each shot (at least three, each at least 0.15s from a cut), and sends those frames to Gemini on OpenRouter in batches of about eight with low reasoning effort. The model returns existing objects an editor could swap for a branded product — bottles, glasses, cans, devices, and similar — and never an empty surface. Each object has a label, a category, a suggested swap-in product, a visibility, and a box in Gemini's 0–1000 `[ymin, xmin, ymax, xmax]` format. Boxes become pixels. Detections of the same object in one shot merge by label similarity and box overlap; the moment runs from the first keyframe where it was seen to the last, clamped to the shot. A single sighting below visibility 0.3 is dropped. The object label is the moment's `whats_there`, which the swap prompt uses. Progress goes to stderr. `MOMENT_MODEL` overrides the model (default `google/gemini-3.8-flash`).
 
 A brand passed to the CLI (`--brand`) or `run_suggest_job` adds that brand's product category (the first sentence of the brief) and its prefer/avoid rules to the prompt. Catalog episode-suggest stays brand-agnostic.
 
@@ -166,8 +166,8 @@ pytest -q
 
 ```
 src/product_placement/
-  suggest.py       # suggest(video) -> moments (Jev or classical CV)
-  jev_moments.py   # contact sheets + Jev boxes via OpenRouter
+  suggest.py       # suggest(video) -> moments (Gemini or classical CV)
+  jev_moments.py   # per-shot Gemini object boxes via OpenRouter
   catalog.py       # titles/episodes/moments/brands/placements + seed CLI
   db.py            # Postgres or SQLite
   object_store.py  # S3 or local objects/
