@@ -57,6 +57,8 @@ _PROFILE_PROPERTIES: dict[str, Any] = {
         "items": {"type": "string", "enum": VOCAB},
         "maxItems": 6,
     },
+    "productUrl": {"type": "string", "nullable": True},
+    "image_url": {"type": "string", "nullable": True},
 }
 PROFILE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -169,10 +171,22 @@ class TinyFish:
         _raise_for_status(resp, "search")
         return resp.json()
 
-    def fetch(self, urls: list[str]) -> dict[str, Any]:
+    def fetch(
+        self,
+        urls: list[str],
+        format: str = "markdown",
+        *,
+        links: bool = False,
+        image_links: bool = False,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"urls": urls[:10], "format": format}
+        if links:
+            body["links"] = True
+        if image_links:
+            body["image_links"] = True
         resp = self._client.post(
             FETCH_URL,
-            json={"urls": urls[:10], "format": "markdown"},
+            json=body,
             headers=self._headers,
             timeout=FETCH_TIMEOUT_S,
         )
@@ -272,6 +286,10 @@ def build_goal(business: str, product: str, note: str = "") -> str:
         "bed for a breakfast cereal, wine glass for a kids' drink). Leave it empty if "
         "nothing clashes; never fill it just to reach a count.",
         "- prefer and avoid may only use values the output schema allows.",
+        f"- productUrl: the URL of the page for {product} on this site, or null.",
+        f"- image_url: the direct URL of the single-unit {product} image on that page: a "
+        "front-facing packshot on a plain or transparent background, at the largest size "
+        "available. Not a lifestyle photo, a multipack or a logo. Null if there isn't one.",
         "- status: ok when you could read the site. If a login wall, bot check or "
         "missing page stops you, set status to blocked or not_found and explain why "
         "in reason.",
@@ -395,6 +413,7 @@ def cache_path(website: str, product: str) -> Path:
 
 
 def read_cache(website: str, product: str, *, now: float | None = None) -> dict[str, Any] | None:
+    """Cached `{"profile", "image_url", "product_url"}` under 7 days old, else None."""
     path = cache_path(website, product)
     if not path.is_file():
         return None
@@ -405,11 +424,24 @@ def read_cache(website: str, product: str, *, now: float | None = None) -> dict[
     age = (now if now is not None else time.time()) - float(entry.get("saved_at") or 0)
     profile = entry.get("profile")
     if age < CACHE_TTL_S and isinstance(profile, dict):
-        return profile
+        return entry
     return None
 
 
-def write_cache(website: str, product: str, profile: dict[str, Any]) -> None:
+def write_cache(
+    website: str,
+    product: str,
+    profile: dict[str, Any],
+    *,
+    image_url: str | None = None,
+    product_url: str | None = None,
+) -> None:
     path = cache_path(website, product)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"saved_at": time.time(), "profile": profile}, indent=2) + "\n")
+    entry = {
+        "saved_at": time.time(),
+        "profile": profile,
+        "image_url": image_url,
+        "product_url": product_url,
+    }
+    path.write_text(json.dumps(entry, indent=2) + "\n")

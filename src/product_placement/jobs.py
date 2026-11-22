@@ -622,10 +622,13 @@ def run_research_job(
     note: str = "",
     client: Any = None,
     tinyfish: Any = None,
+    image_http: Any = None,
+    clip: Any = None,
 ) -> dict[str, Any]:
-    """TinyFish search → fetch → one Agent run → BrandProfile. Never raises.
+    """TinyFish search → fetch → one Agent run → BrandProfile + product images. Never raises.
 
-    The web client saves the brand (step 4); this worker only builds the profile.
+    Image sourcing is free and never fails the job. The web client saves the brand
+    after the user picks an image; this worker only builds the profile.
     """
     import httpx
 
@@ -648,7 +651,6 @@ def run_research_job(
         {"label": "Fetching your website", "detail": host_of(site) or "finding your site"},
         {"label": "Reading your pages", "detail": "TinyFish web agent"},
         {"label": "Building brand profile", "detail": "tone, audience, visual identity"},
-        {"label": "Saving brand profile", "detail": "POST /api/catalog/brands"},
     ]
     sources: list[dict[str, Any]] = []
     write_status(
@@ -664,12 +666,32 @@ def run_research_job(
         tinyfish_run_id=None,
         streaming_url=None,
         cached=False,
+        images=[],
         created_at=utc_now(),
     )
     t0 = time.perf_counter()
 
     def ms_since(t: float) -> int:
         return int((time.perf_counter() - t) * 1000)
+
+    def find_images(agent_url: str | None, product_url: str | None) -> list[dict[str, Any]]:
+        from product_placement.product_image import source_product_images
+
+        steps[2]["detail"] = "Finding product images"
+        write_status(job_id, step=2, steps=steps, detail="Finding product images")
+        images = source_product_images(
+            job_dir(job_id),
+            fetch=tf.fetch,
+            site=site,
+            product=product,
+            agent_url=agent_url,
+            product_url=product_url,
+            http=image_http,
+            clip=clip,
+        )
+        n = len(images)
+        steps[2]["detail"] = f"{n} product image{'' if n == 1 else 's'} found" if n else "No usable product image"
+        return images
 
     try:
         tf = tinyfish or TinyFish(client=client)
@@ -696,15 +718,17 @@ def run_research_job(
         cached = read_cache(site, product)
         if cached is not None:
             steps[1]["detail"] = f"{host} · cached profile"
-            steps[2]["detail"] = "Saved profile from the last 7 days"
+            images = find_images(cached.get("image_url"), cached.get("product_url"))
+            steps[3]["detail"] = "Saved profile from the last 7 days"
             return write_status(
                 job_id,
                 status="completed",
-                step=4,
+                step=len(steps),
                 steps=steps,
                 sources=sources,
                 detail="Using a cached profile",
-                profile=cached,
+                profile=cached["profile"],
+                images=images,
                 cached=True,
                 elapsed_s=round(time.perf_counter() - t0, 3),
             )
@@ -752,17 +776,23 @@ def run_research_job(
                 f"The TinyFish agent {what} on {host}" + (f": {reason}" if reason else ".")
             )
 
-        # 4. Map to the web BrandProfile. The client saves the brand.
+        # 4. Product images (free): agent URL, page og/img, Shopify JSON.
+        agent_url = str(result.get("image_url") or "").strip() or None
+        product_url = str(result.get("productUrl") or "").strip() or None
+        images = find_images(agent_url, product_url)
+
+        # 5. Map to the web BrandProfile. The client saves the brand.
         write_status(job_id, step=3, steps=steps, detail="Building brand profile")
         profile = to_brand_profile(result, business, site, product)
-        write_cache(site, product, profile)
+        write_cache(site, product, profile, image_url=agent_url, product_url=product_url)
         return write_status(
             job_id,
             status="completed",
-            step=4,
+            step=len(steps),
             steps=steps,
             detail="Profile ready",
             profile=profile,
+            images=images,
             agent_steps=agent_steps,
             elapsed_s=round(time.perf_counter() - t0, 3),
         )

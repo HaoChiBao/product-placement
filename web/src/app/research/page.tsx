@@ -1,7 +1,7 @@
 "use client"
 
 import { useSearchParams } from "next/navigation"
-import { Suspense, useEffect, useMemo, useRef, useState } from "react"
+import { Suspense, useEffect, useMemo, useState } from "react"
 
 import { AnimatedGroup } from "@/components/motion-primitives/animated-group"
 import { TextEffect } from "@/components/motion-primitives/text-effect"
@@ -12,8 +12,6 @@ import { Button, ButtonLink } from "@/components/ui/button"
 import { Panel } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/empty-state"
 import { PageShell } from "@/components/ui/page-shell"
-import { createBrand, session } from "@/lib/catalog-client"
-import { takePendingAsset } from "@/lib/pending-asset"
 import {
   briefFor,
   forgetResearch,
@@ -53,15 +51,16 @@ function Research() {
   const [profile, setProfile] = useState<BrandProfile | null>(null)
   const [error, setError] = useState("")
   const [attempt, setAttempt] = useState(0)
-  const asset = useRef<File | null | undefined>(undefined)
+  const [jobId, setJobId] = useState("")
 
   useEffect(() => {
-    if (asset.current === undefined) asset.current = takePendingAsset()
     let cancelled = false
     ;(async () => {
       setError("")
       setStepIdx(0)
       setSources(0)
+      setProfile(null)
+      setJobId("")
       let p: BrandProfile
       let n = mockSteps.length
       let started: { jobId: string } | { mock: true } = { mock: true }
@@ -98,7 +97,7 @@ function Research() {
         forgetResearch(input, attempt)
         p = job.profile!
         n = job.steps.length
-        setStepIdx(n - 1)
+        setJobId(started.jobId)
       } else {
         // No TinyFish key on the server (or ?mock=1): simulate the research steps.
         setLive(null)
@@ -116,18 +115,11 @@ function Research() {
         }
         if (cancelled) return
         setSources(mockSources.length)
-        setStepIdx(mockSteps.length - 1)
         p = research.profile(input)
       }
-      try {
-        const brand = await createBrand(p.business, briefFor(p, input.note), asset.current)
-        if (cancelled) return
-        session.set({ brandId: brand.id, profile: p, hasAsset: Boolean(asset.current) })
-        setStepIdx(n)
-        setProfile(p)
-      } catch (e) {
-        if (!cancelled) setError(`Couldn’t save the brand profile: ${e instanceof Error ? e.message : String(e)}`)
-      }
+      // The brand is saved on the next step, once a product image is chosen.
+      setStepIdx(n)
+      setProfile(p)
     })()
     return () => {
       cancelled = true
@@ -135,6 +127,12 @@ function Research() {
   }, [attempt, forceMock, mockSteps, mockSources, input])
 
   const done = Boolean(profile)
+  const imageStepHref = useMemo(() => {
+    const q = new URLSearchParams(params.toString())
+    if (jobId) q.set("job", jobId)
+    else q.delete("job")
+    return `/product-image?${q}`
+  }, [params, jobId])
   const pct = steps.length ? Math.min(100, (stepIdx / steps.length) * 100) : 0
 
   return (
@@ -154,7 +152,7 @@ function Research() {
           <p className="mt-2 text-muted-foreground">
             {done
               ? "Check it over. We use this to keep every placement on-brand."
-              : "A TinyFish web agent is searching and fetching your public pages. This usually takes under a minute."}
+              : "A TinyFish web agent is searching and fetching your public pages, and looking for a clean product image. This usually takes a minute or two."}
           </p>
           <Panel className="mt-[22px] px-[18px] py-4 shadow-none">
             <div className="mb-3.5 h-1 overflow-hidden rounded-full bg-muted">
@@ -233,7 +231,7 @@ function Research() {
               {done ? (
                 <Badge>
                   <StatusDot />
-                  Saved
+                  Ready
                 </Badge>
               ) : (
                 <Badge variant="warning">
@@ -293,8 +291,8 @@ function Research() {
                   <ButtonLink href="/" variant="secondary">
                     Edit
                   </ButtonLink>
-                  <ButtonLink href="/videos" variant="primary" size="lg" className="flex-1">
-                    Browse creator videos →
+                  <ButtonLink href={imageStepHref} variant="primary" size="lg" className="flex-1">
+                    Looks right →
                   </ButtonLink>
                 </div>
               </>
