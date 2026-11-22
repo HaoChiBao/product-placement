@@ -285,6 +285,35 @@ def run_swap_job(
         raise
 
 
+def _claim_episode_suggest(conn, episode_id: str) -> bool:
+    """Atomically claim an episode for suggest. Returns False if already claimed/ready."""
+    result = conn.execute(
+        "UPDATE episodes SET suggest_status = ? WHERE id = ? AND ("
+        "suggest_status IS NULL OR suggest_status IN ('', 'queued', 'failed')"
+        ")",
+        ("running", episode_id),
+    )
+    conn.commit()
+    rowcount = getattr(result, "rowcount", None)
+    if rowcount is None:
+        # Some drivers need a cursor; fall back to re-read.
+        from product_placement.catalog import get_episode
+
+        ep = get_episode(conn, id=episode_id)
+        return bool(ep and ep.get("suggest_status") == "running")
+    return int(rowcount) > 0
+
+
+def reset_stale_suggest_running(conn) -> int:
+    """Crash recovery: flip abandoned 'running' rows back to queued (boot/seed)."""
+    result = conn.execute(
+        "UPDATE episodes SET suggest_status = ? WHERE suggest_status = ?",
+        ("queued", "running"),
+    )
+    conn.commit()
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
     """Download episode video from object store, run suggest(), persist moments + frames."""
     import tempfile
@@ -304,11 +333,16 @@ def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
         if not video_key:
             raise ValueError(f"episode {episode_id} has no video_key")
 
-        conn.execute(
-            "UPDATE episodes SET suggest_status = ? WHERE id = ?",
-            ("running", episode_id),
-        )
-        conn.commit()
+        if not _claim_episode_suggest(conn, episode_id):
+            # Another worker owns it, or it's already ready.
+            fresh = get_episode(conn, id=episode_id) or ep
+            return {
+                "episode_id": episode_id,
+                "suggest_status": fresh.get("suggest_status"),
+                "skipped": True,
+                "reason": "already claimed or ready",
+                "updated_at": utc_now(),
+            }
 
         store = get_object_store()
         with tempfile.TemporaryDirectory() as tmp:
@@ -326,7 +360,7 @@ def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
                 use_clip=True,
             )
 
-            # Replace prior moments for this episode.
+            # Replace prior moments for this episode (only after claim).
             conn.execute("DELETE FROM moments WHERE episode_id = ?", (episode_id,))
             conn.commit()
 
@@ -361,7 +395,7 @@ def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
             "moments": stored,
             "updated_at": utc_now(),
         }
-    except Exception as exc:
+    except Exception:
         try:
             conn.execute(
                 "UPDATE episodes SET suggest_status = ? WHERE id = ?",

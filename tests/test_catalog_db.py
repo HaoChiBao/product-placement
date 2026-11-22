@@ -243,6 +243,46 @@ def test_migrate_file_brands(catalog_env, tmp_path):
     assert migrate_file_brands(conn) == []
 
 
+def test_claim_episode_suggest_is_exclusive(catalog_env, tmp_path):
+    from product_placement.jobs import _claim_episode_suggest, reset_stale_suggest_running
+
+    conn, data = catalog_env
+    title = create_title(conn, name="Claim Film", kind="movie")
+    video = tmp_path / "c.mp4"
+    import subprocess
+
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=160x90:d=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(video),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    ep = create_episode(
+        conn,
+        title_id=title["id"],
+        name="E1",
+        season=1,
+        episode=1,
+        video_path=video,
+    )
+    assert _claim_episode_suggest(conn, ep["id"]) is True
+    assert _claim_episode_suggest(conn, ep["id"]) is False
+    # Crash recovery flips running → queued, then claim works again.
+    assert reset_stale_suggest_running(conn) == 1
+    assert _claim_episode_suggest(conn, ep["id"]) is True
+
+
 def test_placement_paid_requires_confirm(catalog_env, monkeypatch):
     conn, data = catalog_env
     # Minimal placement row so the job can load it before the confirm gate...

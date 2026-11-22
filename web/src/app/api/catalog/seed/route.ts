@@ -14,8 +14,8 @@ export async function POST() {
       suggest_queue?: { id: string; suggest_status?: string }[]
       skipped?: boolean
     }
-    // Always drain suggest queue — boot seed can create episodes without
-    // spawning jobs, and a later seed call must still kick them off.
+    // Drain suggest queue. Jobs atomically claim the row so a concurrent
+    // boot drain or double-click is a no-op instead of a double suggest().
     const queue = result.suggest_queue?.length
       ? result.suggest_queue
       : result.episodes || []

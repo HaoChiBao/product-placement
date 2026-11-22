@@ -24,10 +24,13 @@ mkdir -p "${DATA_DIR}/jobs" "${DATA_DIR}/objects"
     echo "[catalog-boot] drain episode-suggest queue"
     "${PYTHON_BIN}" - <<'PY'
 from product_placement.db import fetchall_dicts, get_connection, init_schema
-from product_placement.jobs import run_episode_suggest_job
+from product_placement.jobs import reset_stale_suggest_running, run_episode_suggest_job
 
 conn = get_connection()
 init_schema(conn)
+# Crash recovery: abandoned 'running' rows never finish after OOM/restart.
+reset = reset_stale_suggest_running(conn)
+print(f"[catalog-boot] reclaimed stale running={reset}", flush=True)
 eps = fetchall_dicts(
     conn,
     "SELECT id, suggest_status FROM episodes "
@@ -40,7 +43,9 @@ for ep in eps:
     eid = ep["id"]
     try:
         print(f"[catalog-boot] episode-suggest {eid}", flush=True)
-        run_episode_suggest_job(eid, n=5)
+        out = run_episode_suggest_job(eid, n=5)
+        if out.get("skipped"):
+            print(f"[catalog-boot] skipped {eid}: {out.get('reason')}", flush=True)
     except Exception as exc:
         print(f"[catalog-boot] suggest failed {eid}: {exc}", flush=True)
 PY
