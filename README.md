@@ -36,6 +36,7 @@ Open http://localhost:$PORT (default **3000**). Railway injects `$PORT` automati
 | `AWS_DEFAULT_REGION` | no | S3 region (default `us-east-1`) |
 | `OPENROUTER_API_KEY` | no | When set, suggest uses Jev on OpenRouter. Unset keeps the classical CV finder |
 | `MOMENT_MODEL` | no | OpenRouter model (default `typesafe/jev-router`) |
+| `TINYFISH_API_KEY` | no | TinyFish key for `/research`: web search, page fetch and one paid agent run (~$0.016/step) per brand; without it the research page falls back to the mock |
 
 Auth is resolved by `product_placement.higgsfield.auth_header`: prefer `HF_KEY`, else `HF_API_KEY_ID` + `HF_API_KEY_SECRET`.
 
@@ -58,7 +59,7 @@ Brand-side flow (the only UI; the provider and watch APIs are unchanged):
 | Route | Role |
 |-------|------|
 | `/` | Your product: business name, website, product, optional product image |
-| `/research` | Brand research (TinyFish steps are mocked for now), then `POST /api/catalog/brands` |
+| `/research` | Brand research with TinyFish (`POST /api/research`, mock without `TINYFISH_API_KEY` or with `?mock=1`), then `POST /api/catalog/brands` |
 | `/videos` | Catalog episodes with their detected placement spots |
 | `/review/<titleId>/<episodeId>` | Time bar with every spot; approve queues `placement-swap` (real when Higgsfield keys are set; otherwise queued with key-missing — no fake clip) |
 | `/campaigns` | Draft / in-progress / live campaigns from the DB |

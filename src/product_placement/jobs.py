@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 import traceback
 import uuid
@@ -612,6 +613,178 @@ def run_placement_swap_job(
         conn.close()
 
 
+def run_research_job(
+    job_id: str,
+    *,
+    business: str,
+    website: str = "",
+    product: str,
+    note: str = "",
+    client: Any = None,
+    tinyfish: Any = None,
+) -> dict[str, Any]:
+    """TinyFish search → fetch → one Agent run → BrandProfile. Never raises.
+
+    The web client saves the brand (step 4); this worker only builds the profile.
+    """
+    import httpx
+
+    from product_placement.research import (
+        PROFILE_SCHEMA,
+        ResearchError,
+        TinyFish,
+        build_goal,
+        host_of,
+        normalize_site,
+        pick_official_site,
+        read_cache,
+        to_brand_profile,
+        write_cache,
+    )
+
+    site = normalize_site(website)
+    steps = [
+        {"label": "Searching the web", "detail": f"“{business}” · “{product}”"},
+        {"label": "Fetching your website", "detail": host_of(site) or "finding your site"},
+        {"label": "Reading your pages", "detail": "TinyFish web agent"},
+        {"label": "Building brand profile", "detail": "tone, audience, visual identity"},
+        {"label": "Saving brand profile", "detail": "POST /api/catalog/brands"},
+    ]
+    sources: list[dict[str, Any]] = []
+    write_status(
+        job_id,
+        type="research",
+        status="running",
+        step=0,
+        steps=steps,
+        sources=sources,
+        detail="Searching the web",
+        profile=None,
+        error=None,
+        tinyfish_run_id=None,
+        streaming_url=None,
+        cached=False,
+        created_at=utc_now(),
+    )
+    t0 = time.perf_counter()
+
+    def ms_since(t: float) -> int:
+        return int((time.perf_counter() - t) * 1000)
+
+    try:
+        tf = tinyfish or TinyFish(client=client)
+
+        # 1. Search (free). Picks the site when none was given.
+        query = f"{business} {product}".strip()
+        t = time.perf_counter()
+        try:
+            found = tf.search(query)
+            sources.append({"kind": "search", "url": f"“{query}”", "ms": ms_since(t)})
+        except (ResearchError, httpx.HTTPError):
+            if site:
+                found = {}
+            else:
+                raise
+        if not site:
+            site = pick_official_site(found.get("results") or [], business)
+            if not site:
+                raise ResearchError(f"Couldn't find a website for {business}. Add it on the first page.")
+        host = host_of(site)
+        steps[1]["detail"] = host
+        write_status(job_id, step=1, steps=steps, sources=sources, detail=f"Fetching {host}")
+
+        cached = read_cache(site, product)
+        if cached is not None:
+            steps[1]["detail"] = f"{host} · cached profile"
+            steps[2]["detail"] = "Saved profile from the last 7 days"
+            return write_status(
+                job_id,
+                status="completed",
+                step=4,
+                steps=steps,
+                sources=sources,
+                detail="Using a cached profile",
+                profile=cached,
+                cached=True,
+                elapsed_s=round(time.perf_counter() - t0, 3),
+            )
+
+        # 2. Fetch (free). Failures are ignored; the agent reads the site itself.
+        t = time.perf_counter()
+        try:
+            fetched = tf.fetch([site, f"{site}/about"])
+            ms = ms_since(t)
+            pages = fetched.get("results") or []
+            for page in pages:
+                url = str(page.get("final_url") or page.get("url") or "")
+                label = re.sub(r"^https?://(www\.)?", "", url).rstrip("/")
+                if label and label not in {s["url"] for s in sources}:
+                    sources.append({"kind": "fetch", "url": label, "ms": ms})
+            steps[1]["detail"] = f"{host} · {len(pages)} page{'' if len(pages) == 1 else 's'}"
+        except Exception:
+            steps[1]["detail"] = f"{host} · fetch skipped"
+
+        # 3. One Agent run (paid). Live PROGRESS lines go into the step detail.
+        agent_steps = 0
+        write_status(
+            job_id, step=2, steps=steps, sources=sources, detail="Starting the web agent"
+        )
+
+        def on_event(event: dict[str, Any]) -> None:
+            nonlocal agent_steps
+            kind = event.get("type")
+            if kind == "STARTED" and event.get("run_id"):
+                write_status(job_id, tinyfish_run_id=str(event["run_id"]))
+            elif kind == "STREAMING_URL" and event.get("streaming_url"):
+                write_status(job_id, streaming_url=str(event["streaming_url"]))
+            elif kind == "PROGRESS" and event.get("purpose"):
+                agent_steps += 1
+                steps[2]["detail"] = str(event["purpose"])
+                write_status(
+                    job_id, steps=steps, detail=str(event["purpose"]), agent_steps=agent_steps
+                )
+
+        result = tf.agent_sse(site, build_goal(business, product, note), PROFILE_SCHEMA, on_event)
+        if result.get("status") != "ok":
+            reason = str(result.get("reason") or "").strip()
+            what = "was blocked" if result.get("status") == "blocked" else "couldn't find the page"
+            raise ResearchError(
+                f"The TinyFish agent {what} on {host}" + (f": {reason}" if reason else ".")
+            )
+
+        # 4. Map to the web BrandProfile. The client saves the brand.
+        write_status(job_id, step=3, steps=steps, detail="Building brand profile")
+        profile = to_brand_profile(result, business, site, product)
+        write_cache(site, product, profile)
+        return write_status(
+            job_id,
+            status="completed",
+            step=4,
+            steps=steps,
+            detail="Profile ready",
+            profile=profile,
+            agent_steps=agent_steps,
+            elapsed_s=round(time.perf_counter() - t0, 3),
+        )
+    except Exception as exc:
+        # Exit 0 with a readable error so the spawn exit handler doesn't overwrite it.
+        if isinstance(exc, ResearchError):
+            message = str(exc)
+        elif isinstance(exc, httpx.TimeoutException):
+            message = "TinyFish took too long to respond. Try again."
+        elif isinstance(exc, httpx.HTTPError):
+            message = "Couldn't reach TinyFish. Check the connection and try again."
+        else:
+            message = f"Research failed: {exc}"
+        return write_status(
+            job_id,
+            status="failed",
+            detail="Failed",
+            error=message,
+            elapsed_s=round(time.perf_counter() - t0, 3),
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="product_placement.jobs")
     sub = p.add_subparsers(dest="command", required=True)
@@ -637,6 +810,13 @@ def build_parser() -> argparse.ArgumentParser:
     es = sub.add_parser("episode-suggest")
     es.add_argument("--episode-id", required=True)
     es.add_argument("-n", type=int, default=5)
+
+    br = sub.add_parser("brand-research")
+    br.add_argument("--job-id", required=True)
+    br.add_argument("--business", required=True)
+    br.add_argument("--website", default="")
+    br.add_argument("--product", required=True)
+    br.add_argument("--note", default="")
 
     ps = sub.add_parser("placement-swap")
     ps.add_argument("--placement-id", required=True)
@@ -687,6 +867,15 @@ def main(argv: list[str] | None = None) -> None:
         if args.command == "episode-suggest":
             result = run_episode_suggest_job(args.episode_id, n=args.n)
             print(json.dumps(result, indent=2, default=str))
+            return
+        if args.command == "brand-research":
+            run_research_job(
+                args.job_id,
+                business=args.business,
+                website=args.website,
+                product=args.product,
+                note=args.note,
+            )
             return
         if args.command == "placement-swap":
             result = run_placement_swap_job(
