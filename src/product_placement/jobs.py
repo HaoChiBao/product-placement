@@ -580,6 +580,12 @@ def run_placement_swap_job(
                 test_mode=1 if test_mode else 0,
                 error=None,
             )
+            try:
+                from product_placement.catalog import refresh_campaign_for_placement
+
+                refresh_campaign_for_placement(conn, placement_id)
+            except Exception:
+                pass
             return updated
     except Exception as exc:
         try:
@@ -589,6 +595,12 @@ def run_placement_swap_job(
                 status="failed",
                 error=str(exc)[:2000],
             )
+            try:
+                from product_placement.catalog import refresh_campaign_for_placement
+
+                refresh_campaign_for_placement(conn, placement_id)
+            except Exception:
+                pass
         except Exception:
             pass
         raise

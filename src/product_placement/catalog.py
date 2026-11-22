@@ -1763,8 +1763,10 @@ def upsert_placement(
     if existing:
         cur = str(existing.get("status") or "")
         if status == "approved":
+            held = bool(str(existing.get("error") or "").strip())
             # Already in-flight or done — do not re-queue (avoids double Seedance bills).
-            if cur in {"queued", "rendering", "ready"}:
+            # Exception: queued/failed with an error (e.g. key missing) may retry.
+            if cur in {"queued", "rendering", "ready"} and not (cur == "queued" and held):
                 row = get_placement(conn, id=existing["id"])
                 assert row is not None
                 row["spawn"] = False
@@ -1774,8 +1776,8 @@ def upsert_placement(
         else:
             new_status = status
         conn.execute(
-            "UPDATE placements SET status = ?, updated_at = ?, episode_id = ? WHERE id = ?",
-            (new_status, now, ep_id, existing["id"]),
+            "UPDATE placements SET status = ?, updated_at = ?, episode_id = ?, error = ? WHERE id = ?",
+            (new_status, now, ep_id, None if status == "approved" else existing.get("error"), existing["id"]),
         )
         conn.commit()
         row = get_placement(conn, id=existing["id"])
@@ -1809,6 +1811,108 @@ def update_placement(conn: Connection, placement_id: str, **fields: Any) -> dict
     conn.execute(f"UPDATE placements SET {cols} WHERE id = ?", vals)
     conn.commit()
     return get_placement(conn, id=placement_id)  # type: ignore[return-value]
+
+
+# ---------------------------------------------------------------------------
+# Campaigns (brand × episode)
+# ---------------------------------------------------------------------------
+
+CAMPAIGN_STATUSES = frozenset({"draft", "in_progress", "live"})
+
+
+def _derive_campaign_status(conn: Connection, *, brand_id: str, episode_id: str) -> str:
+    rows = fetchall_dicts(
+        conn,
+        "SELECT status FROM placements WHERE brand_id = ? AND episode_id = ?",
+        (brand_id, episode_id),
+    )
+    statuses = {str(r.get("status") or "") for r in rows}
+    if "ready" in statuses:
+        return "live"
+    if statuses & {"queued", "rendering", "approved", "failed"}:
+        return "in_progress"
+    if "rejected" in statuses:
+        return "in_progress"
+    return "draft"
+
+
+def list_campaigns(conn: Connection, *, brand_id: str) -> list[dict[str, Any]]:
+    return fetchall_dicts(
+        conn,
+        "SELECT * FROM campaigns WHERE brand_id = ? ORDER BY updated_at DESC",
+        (brand_id,),
+    )
+
+
+def get_campaign(
+    conn: Connection, *, brand_id: str, episode_id: str
+) -> dict[str, Any] | None:
+    return fetchone_dict(
+        conn,
+        "SELECT * FROM campaigns WHERE brand_id = ? AND episode_id = ?",
+        (brand_id, episode_id),
+    )
+
+
+def upsert_campaign(
+    conn: Connection,
+    *,
+    brand_id: str,
+    episode_id: str,
+    title_id: str | None = None,
+    status: str | None = None,
+) -> dict[str, Any]:
+    ep = get_episode(conn, id=episode_id)
+    if not ep:
+        raise ValueError(f"episode not found: {episode_id}")
+    tid = title_id or str(ep.get("title_id") or "")
+    if not tid:
+        raise ValueError("title_id required")
+
+    prefer = (status or "").strip().lower() or None
+    if prefer and prefer not in CAMPAIGN_STATUSES:
+        raise ValueError(f"invalid campaign status: {status}")
+
+    from_placements = _derive_campaign_status(
+        conn, brand_id=brand_id, episode_id=episode_id
+    )
+    # Placement progress wins over an explicit draft.
+    if from_placements in {"live", "in_progress"}:
+        final = from_placements
+    elif prefer:
+        final = prefer
+    else:
+        final = "draft"
+
+    now = utc_now()
+    existing = get_campaign(conn, brand_id=brand_id, episode_id=episode_id)
+    if existing:
+        conn.execute(
+            "UPDATE campaigns SET status = ?, title_id = ?, updated_at = ? WHERE id = ?",
+            (final, tid, now, existing["id"]),
+        )
+        conn.commit()
+        return get_campaign(conn, brand_id=brand_id, episode_id=episode_id)  # type: ignore[return-value]
+
+    cid = new_id()
+    conn.execute(
+        "INSERT INTO campaigns (id, brand_id, title_id, episode_id, status, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (cid, brand_id, tid, episode_id, final, now, now),
+    )
+    conn.commit()
+    return get_campaign(conn, brand_id=brand_id, episode_id=episode_id)  # type: ignore[return-value]
+
+
+def refresh_campaign_for_placement(conn: Connection, placement_id: str) -> dict[str, Any] | None:
+    pl = get_placement(conn, id=placement_id)
+    if not pl:
+        return None
+    return upsert_campaign(
+        conn,
+        brand_id=str(pl["brand_id"]),
+        episode_id=str(pl["episode_id"]),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2304,6 +2408,26 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--moment-id", required=True)
     up.add_argument("--status", required=True, choices=("approved", "rejected"))
 
+    uppl = add("update-placement")
+    uppl.add_argument("--id", required=True)
+    uppl.add_argument("--status", default=None)
+    uppl.add_argument("--error", default=None)
+    uppl.add_argument("--clear-error", action="store_true")
+    uppl.add_argument("--test-mode", type=int, default=None)
+
+    lc = add("list-campaigns")
+    lc.add_argument("--brand-id", required=True)
+
+    uc = add("upsert-campaign")
+    uc.add_argument("--brand-id", required=True)
+    uc.add_argument("--episode-id", required=True)
+    uc.add_argument("--title-id", default=None)
+    uc.add_argument(
+        "--status",
+        default=None,
+        choices=("draft", "in_progress", "live"),
+    )
+
     wp = add("get-watch-payload")
     wp.add_argument("--title-slug", required=True)
     wp.add_argument("--season", type=int, required=True)
@@ -2464,11 +2588,48 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         if args.command == "upsert-placement":
+            row = upsert_placement(
+                conn,
+                brand_id=args.brand_id,
+                moment_id=args.moment_id,
+                status=args.status,
+            )
+            try:
+                refresh_campaign_for_placement(conn, row["id"])
+            except Exception as exc:
+                log.warning("campaign refresh failed: %s", exc)
+            _print_json(row)
+            return
+
+        if args.command == "update-placement":
+            fields: dict[str, Any] = {}
+            if args.status:
+                fields["status"] = args.status
+            if args.clear_error:
+                fields["error"] = None
+            elif args.error is not None:
+                fields["error"] = args.error
+            if args.test_mode is not None:
+                fields["test_mode"] = int(args.test_mode)
+            row = update_placement(conn, args.id, **fields)
+            try:
+                refresh_campaign_for_placement(conn, args.id)
+            except Exception as exc:
+                log.warning("campaign refresh failed: %s", exc)
+            _print_json(row)
+            return
+
+        if args.command == "list-campaigns":
+            _print_json(list_campaigns(conn, brand_id=args.brand_id))
+            return
+
+        if args.command == "upsert-campaign":
             _print_json(
-                upsert_placement(
+                upsert_campaign(
                     conn,
                     brand_id=args.brand_id,
-                    moment_id=args.moment_id,
+                    episode_id=args.episode_id,
+                    title_id=args.title_id,
                     status=args.status,
                 )
             )

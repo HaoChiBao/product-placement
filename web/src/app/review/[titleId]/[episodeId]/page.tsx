@@ -9,14 +9,17 @@ import { videoLabel } from "@/components/video-thumb"
 import {
   decidePlacement,
   fmt,
+  getGenerationInfo,
   isScanned,
   getVideo,
   listMoments,
   listPlacements,
   mediaUrl,
   regionPct,
+  saveCampaign,
   session,
   type CatalogMoment,
+  type GenerationInfo,
   type Placement,
   type Video,
 } from "@/lib/catalog-client"
@@ -33,6 +36,13 @@ const STATUS_LABEL: Record<Status, string> = {
   failed: "Failed",
 }
 const IN_FLIGHT: Status[] = ["approved", "queued", "rendering"]
+
+function statusLabel(st: Status, p?: Placement): string {
+  if (st === "queued" && p?.error?.toLowerCase().includes("key missing")) {
+    return "Key missing"
+  }
+  return STATUS_LABEL[st]
+}
 
 const PLAY = <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor"><path d="M2 1l9 5-9 5z" /></svg>
 const PAUSE = (
@@ -53,6 +63,7 @@ export default function ReviewPage() {
   const [playing, setPlaying] = useState(false)
   const [holding, setHolding] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
+  const [gen, setGen] = useState<GenerationInfo | null>(null)
   const [toast, showToast] = useToast()
   const vidRef = useRef<HTMLVideoElement>(null)
 
@@ -77,6 +88,7 @@ export default function ReviewPage() {
       .then((v) => (v ? setVideo(v) : setError("This video no longer exists.")))
       .catch((e) => setError(String(e.message || e)))
     refresh(s.brandId).catch((e) => setError(String(e.message || e)))
+    getGenerationInfo().then(setGen).catch(() => setGen(null))
   }, [titleId, episodeId, router, refresh])
 
   const statusOf = useCallback((m: CatalogMoment): Status => placements[m.id]?.status || "pending", [placements])
@@ -145,7 +157,15 @@ export default function ReviewPage() {
     try {
       const p = await decidePlacement(brandId, mm.id, status)
       setPlacements((ps) => ({ ...ps, [mm.id]: p }))
-      if (status === "approved") showToast("Placing your product in this moment…")
+      if (status === "approved") {
+        const held = Boolean(p.error?.toLowerCase().includes("key missing"))
+        showToast(
+          held
+            ? "Queued — generation waiting on Higgsfield API key"
+            : "Placing your product in this moment…"
+        )
+        await saveCampaign({ brandId, episodeId, titleId, status: "in_progress" }).catch(() => {})
+      }
     } catch (e) {
       showToast(e instanceof Error ? e.message : String(e))
     } finally {
@@ -157,10 +177,14 @@ export default function ReviewPage() {
     for (const mm of list.filter((x) => statusOf(x) === "pending")) await decide(mm, "approved")
   }
 
-  function saveDraft() {
-    session.saveDraft({ titleId, episodeId, savedAt: new Date().toISOString() })
-    showToast("Saved to drafts")
-    router.push("/campaigns")
+  async function saveDraft() {
+    try {
+      await saveCampaign({ brandId, episodeId, titleId, status: "draft" })
+      showToast("Saved to drafts")
+      router.push("/campaigns")
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : String(e))
+    }
   }
 
   const counts = list.reduce(
@@ -354,16 +378,25 @@ export default function ReviewPage() {
                       <b style={{ textTransform: "capitalize" }}>{i + 1}. {x.whats_there || "Spot"}</b>
                       <small>{fmt(x.start_s)} – {fmt(x.end_s)}</small>
                     </div>
-                    <span className="st-pill" data-st={s}>{STATUS_LABEL[s]}</span>
+                    <span className="st-pill" data-st={s}>{statusLabel(s, placements[x.id])}</span>
                   </button>
+                  {placements[x.id]?.error ? (
+                    <p className="note" style={{ margin: "0 0 6px", gridColumn: "1 / -1" }}>
+                      {placements[x.id].error}
+                    </p>
+                  ) : null}
                   <div className="ed-act">
                     <button
                       className="ok"
-                      aria-pressed={s === "ready" || IN_FLIGHT.includes(s)}
-                      disabled={busy === x.id || s === "ready" || IN_FLIGHT.includes(s)}
+                      aria-pressed={s === "ready" || (IN_FLIGHT.includes(s) && !placements[x.id]?.error)}
+                      disabled={
+                        busy === x.id ||
+                        s === "ready" ||
+                        (IN_FLIGHT.includes(s) && !placements[x.id]?.error)
+                      }
                       onClick={() => decide(x, "approved")}
                     >
-                      ✓ {s === "failed" ? "Retry" : "Approve"}
+                      ✓ {s === "failed" || placements[x.id]?.error ? "Retry" : "Approve"}
                     </button>
                     <button
                       className="no"
@@ -393,7 +426,13 @@ export default function ReviewPage() {
             >
               {counts.pending ? `Review ${counts.pending} more to finish` : "Done, view campaigns"}
             </Link>
-            <p className="note">Approving generates the placement in that moment. Test mode is on, so swaps use the mock backend.</p>
+            <p className="note">
+              {gen?.ready
+                ? "Approving runs the real placement pipeline (Qwen edit + Seedance)."
+                : gen?.mock
+                  ? "Approving runs mock generation (MOCK_HIGGSFIELD is on)."
+                  : "Approving queues generation. Without a Higgsfield API key the placement stays queued — no fake clip is created."}
+            </p>
           </div>
         </aside>
       </main>

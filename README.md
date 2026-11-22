@@ -58,8 +58,10 @@ Brand-side flow (the only UI; the provider and watch APIs are unchanged):
 | `/` | Your product: business name, website, product, optional product image |
 | `/research` | Brand research (TinyFish steps are mocked for now), then `POST /api/catalog/brands` |
 | `/videos` | Catalog episodes with their detected placement spots |
-| `/review/<titleId>/<episodeId>` | Time bar with every spot; approve (queues a test-mode swap) or reject each one |
-| `/campaigns` | Drafts (saved in the browser), in-progress and live placements |
+| `/review/<titleId>/<episodeId>` | Time bar with every spot; approve queues `placement-swap` (real when Higgsfield keys are set; otherwise queued with key-missing — no fake clip) |
+| `/campaigns` | Draft / in-progress / live campaigns from the DB |
+
+Flow notes: [docs/brand-flow.md](docs/brand-flow.md).
 
 Generating a placement needs a product image on the brand. Mock research data lives in `web/src/mock/research.example.ts`; copy it to `research.local.ts` (gitignored) for your own demo data.
 

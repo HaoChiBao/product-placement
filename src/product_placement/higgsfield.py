@@ -44,6 +44,16 @@ class ImageJobResult:
     raw: dict[str, Any]
 
 
+def auth_configured(env: dict[str, str] | None = None) -> bool:
+    """True when HF_KEY or both HF_API_KEY_ID and HF_API_KEY_SECRET are set."""
+    source = env if env is not None else os.environ
+    if (source.get("HF_KEY") or "").strip():
+        return True
+    key_id = (source.get("HF_API_KEY_ID") or "").strip()
+    secret = (source.get("HF_API_KEY_SECRET") or "").strip()
+    return bool(key_id and secret)
+
+
 def auth_header(
     env: dict[str, str] | None = None,
 ) -> dict[str, str]:
@@ -59,6 +69,12 @@ def auth_header(
     raise HiggsfieldError(
         "Set HF_KEY (id:secret) or both HF_API_KEY_ID and HF_API_KEY_SECRET"
     )
+
+
+KEY_MISSING_ERROR = (
+    "Generation queued: Higgsfield API key missing "
+    "(set HF_KEY or HF_API_KEY_ID + HF_API_KEY_SECRET)"
+)
 
 
 DEFAULT_POLL_TIMEOUT_S = 1200.0  # live Seedance jobs can take ~10+ minutes

@@ -209,6 +209,16 @@ CREATE TABLE IF NOT EXISTS placements (
     created_at TEXT,
     updated_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS campaigns (
+    id TEXT PRIMARY KEY,
+    brand_id TEXT,
+    title_id TEXT,
+    episode_id TEXT,
+    status TEXT,
+    created_at TEXT,
+    updated_at TEXT
+);
 """
 
 
