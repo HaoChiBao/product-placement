@@ -242,3 +242,6 @@ web/.next/
 web/.runs/
 *.mov
 suit_clip*.mp4
+
+# local test clips (not ours to redistribute)
+/clips/

@@ -102,6 +102,31 @@ python -m product_placement suggest \
   --out-dir runs/suggest
 ```
 
+### Testing the finder on your own clips
+
+Put videos in `clips/` (gitignored) and set `OPENROUTER_API_KEY` in the repo-root `.env`. Both scripts read that file and write under `runs/` (gitignored).
+
+Watch the finder work on one clip, live in the browser: shot cuts, each batch of keyframes sent to the model with the boxes it returns (`label → swap with · visibility`), then the moments it keeps. `--brand`/`--brief` add a brand to the prompt the same way `run_suggest_job` does.
+
+```bash
+python scripts/watch_detection.py --clip "clips/my clip.mp4"
+python scripts/watch_detection.py --clip "clips/my clip.mp4" --model anthropic/claude-sonnet-5.5 \
+  --brand "Acme Cola" --brief "Soda can. Prefer tables, counters, bars, cups and bottles. Avoid beds."
+```
+
+Compare models on every clip in `clips/`: time, API calls, failed calls, tokens, and the moments each model keeps, plus `runs/model-tests/index.html` with each model's contact sheet side by side.
+
+```bash
+python scripts/compare_moment_models.py
+python scripts/compare_moment_models.py --models google/gemini-3.8-flash openai/gpt-6.1-terra -n 5
+```
+
+To run the whole app on those clips: start the web app with the root `.env` loaded (Next only reads `web/.env*` on its own), upload a clip as a title and episode (`POST /api/catalog/titles`, then `POST /api/catalog/titles/<id>/episodes` with the `video` file), onboard a brand at `/`, and open the clip from `/videos`. With `MOCK_HIGGSFIELD=1`, approving a spot runs the free local mock swap.
+
+```bash
+cd web && node --env-file=../.env node_modules/next/dist/bin/next dev
+```
+
 ## Swap
 
 The hosted UI and catalog placements default to a full-clip edit on OpenRouter **Alibaba Wan 3.0** (`POST /api/v1/videos`, model `alibaba/wan-3.0`):
