@@ -147,8 +147,8 @@ function VideoCard({ v }: { v: Video }) {
     <MorphingDialog
       transition={{ type: "spring", bounce: 0.05, duration: 0.4 }}
     >
-      <MorphingDialogTrigger className="flex min-w-0 flex-col gap-2.5 border-0 bg-transparent p-0 text-left">
-        <VideoThumb v={v}>
+      <MorphingDialogTrigger className="flex w-full min-w-0 flex-col gap-2.5 border-0 bg-transparent p-0 text-left">
+        <VideoThumb v={v} preview>
           {v.duration_s ? (
             <span className="absolute bottom-2 right-2 rounded-[5px] bg-black/72 px-1.5 py-1 font-mono text-[11px] font-medium text-white">
               {fmt(v.duration_s, false)}

@@ -5,9 +5,9 @@ import { useEffect, useState } from "react"
 
 import { AnimatedGroup } from "@/components/motion-primitives/animated-group"
 import { TextEffect } from "@/components/motion-primitives/text-effect"
-import { TransitionPanel } from "@/components/motion-primitives/transition-panel"
 import { TopBar } from "@/components/top-bar"
 import { Badge } from "@/components/ui/badge"
+import { DirectionAwareTabs } from "@/components/ui/direction-aware-tabs"
 import { ButtonLink } from "@/components/ui/button"
 import { EmptyState, Skeleton } from "@/components/ui/empty-state"
 import { PageHeader, PageShell } from "@/components/ui/page-shell"
@@ -19,7 +19,6 @@ import {
   type Campaign,
   type Video,
 } from "@/lib/catalog-client"
-import { cn } from "@/lib/utils"
 
 type Tab = "drafts" | "review" | "live"
 type Tile = { video: Video; campaign: Campaign; badge: string; sub: string; live?: boolean }
@@ -41,7 +40,6 @@ const TABS: [Tab, string][] = [
 ]
 
 export default function CampaignsPage() {
-  const [tab, setTab] = useState<Tab>("drafts")
   const [videos, setVideos] = useState<Record<string, Video>>({})
   const [campaigns, setCampaigns] = useState<Campaign[]>([])
   const [hasBrand, setHasBrand] = useState(true)
@@ -86,7 +84,6 @@ export default function CampaignsPage() {
     live: forStatus("live"),
   }
 
-  const tabIndex = TABS.findIndex(([k]) => k === tab)
   const newHref = hasBrand ? "/videos" : "/"
 
   return (
@@ -112,25 +109,6 @@ export default function CampaignsPage() {
           }
         />
 
-        <div className="mb-[22px] flex gap-1 border-b border-border" role="tablist">
-          {TABS.map(([k, l]) => (
-            <button
-              key={k}
-              role="tab"
-              type="button"
-              aria-selected={tab === k}
-              onClick={() => setTab(k)}
-              className={cn(
-                "-mb-px border-b-2 border-transparent px-3.5 py-2.5 font-medium text-muted-foreground transition-colors duration-150",
-                tab === k && "border-foreground text-foreground"
-              )}
-            >
-              {l}{" "}
-              <span className="ml-1 font-mono text-[11.5px] text-faint">{tiles[k].length}</span>
-            </button>
-          ))}
-        </div>
-
         {error ? (
           <p className="mb-4 text-[13px] text-destructive">Couldn’t load campaigns: {error}</p>
         ) : null}
@@ -146,17 +124,13 @@ export default function CampaignsPage() {
             ))}
           </div>
         ) : (
-          <TransitionPanel
-            activeIndex={tabIndex}
-            transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-            variants={{
-              enter: { opacity: 0, y: 8, filter: "blur(4px)" },
-              center: { opacity: 1, y: 0, filter: "blur(0px)" },
-              exit: { opacity: 0, y: -6, filter: "blur(4px)" },
-            }}
-          >
-            {TABS.map(([k]) => (
-              <div key={k}>
+          <DirectionAwareTabs
+            className="mb-5 self-start bg-stage"
+            tabs={TABS.map(([k, l], id) => ({
+              id,
+              label: `${l} · ${tiles[k].length}`,
+              content: (
+              <div key={k} className="pt-1">
                 {!tiles[k].length && k !== "drafts" ? (
                   <EmptyState
                     title={
@@ -221,8 +195,9 @@ export default function CampaignsPage() {
                   ) : null}
                 </AnimatedGroup>
               </div>
-            ))}
-          </TransitionPanel>
+              ),
+            }))}
+          />
         )}
       </PageShell>
     </>

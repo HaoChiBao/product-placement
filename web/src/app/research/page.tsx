@@ -3,7 +3,6 @@
 import { useSearchParams } from "next/navigation"
 import { Suspense, useEffect, useMemo, useRef, useState } from "react"
 
-import { AnimatedGroup } from "@/components/motion-primitives/animated-group"
 import { TextEffect } from "@/components/motion-primitives/text-effect"
 import { TextShimmer } from "@/components/motion-primitives/text-shimmer"
 import { TopBar } from "@/components/top-bar"
@@ -11,11 +10,20 @@ import { Badge, StatusDot } from "@/components/ui/badge"
 import { Button, ButtonLink } from "@/components/ui/button"
 import { Panel } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/empty-state"
+import { RollingNumber } from "@/components/ui/rolling-number"
+import {
+  TerminalAnimationBlinkingCursor,
+  TerminalAnimationCommandBar,
+  TerminalAnimationContent,
+  TerminalAnimationOutput,
+  TerminalAnimationRoot,
+  TerminalAnimationWindow,
+  type TabContent,
+} from "@/components/ui/terminal-animation"
 import { PageShell } from "@/components/ui/page-shell"
 import { createBrand, session } from "@/lib/catalog-client"
 import { takePendingAsset } from "@/lib/pending-asset"
 import { briefFor, research, type BrandProfile, type ResearchInput } from "@/lib/research"
-import { cn } from "@/lib/utils"
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -101,67 +109,14 @@ function Research() {
               ? "Check it over. We use this to keep every placement on-brand."
               : "A TinyFish web agent is searching and fetching your public pages. This usually takes under a minute."}
           </p>
-          <Panel className="mt-[22px] px-[18px] py-4 shadow-none">
-            <div className="mb-3.5 h-1 overflow-hidden rounded-full bg-muted">
-              <i className="block h-full bg-accent transition-[width] duration-500 ease-out" style={{ width: `${pct}%` }} />
-            </div>
-            <ul className="m-0 flex list-none flex-col gap-2.5 p-0">
-              {steps.map((s, i) => {
-                const ok = i < stepIdx
-                const wip = i === stepIdx && !error
-                return (
-                  <li
-                    key={s.label}
-                    className={cn(
-                      "flex items-start gap-2.5 text-[13.5px] text-faint",
-                      (ok || wip) && "text-foreground"
-                    )}
-                  >
-                    <i
-                      className={cn(
-                        "mt-0.5 grid size-4 shrink-0 place-items-center rounded-full border-[1.5px] border-border font-mono text-[10px] not-italic",
-                        wip && "animate-spin border-accent border-t-transparent",
-                        ok && "border-accent bg-accent text-white"
-                      )}
-                    >
-                      {ok ? "✓" : ""}
-                    </i>
-                    <span>
-                      {s.label}
-                      <small className="mt-0.5 block font-mono text-[11.5px] text-muted-foreground">{s.detail}</small>
-                    </span>
-                  </li>
-                )
-              })}
-            </ul>
-            {error ? (
-              <div className="mt-3 flex flex-wrap items-center gap-2.5">
-                <span className="text-[13px] text-destructive">Couldn’t save the brand profile: {error}</span>
-                <Button size="sm" onClick={() => setAttempt((a) => a + 1)}>
-                  Try again
-                </Button>
-              </div>
-            ) : null}
-          </Panel>
-          <Panel className="mt-3.5 px-[18px] py-3.5 shadow-none">
-            <div className="mb-2 flex justify-between">
-              <span className="eyebrow">Sources fetched</span>
-              <span className="font-mono text-muted-foreground">{sources}</span>
-            </div>
-            <AnimatedGroup preset="fade" className="flex flex-col gap-1.5" as="ul">
-              {allSources.slice(0, sources).map((s) => (
-                <li key={s.url} className="flex min-w-0 items-center gap-2.5 text-[12.5px]">
-                  <span className="shrink-0 rounded px-1.5 py-0.5 font-mono text-[10.5px] text-muted-foreground bg-muted">
-                    {s.kind}
-                  </span>
-                  <b className="min-w-0 truncate font-medium">{s.url}</b>
-                  <em className="ml-auto shrink-0 font-mono text-[11px] not-italic text-faint">
-                    {(s.ms / 1000).toFixed(1)}s
-                  </em>
-                </li>
-              ))}
-            </AnimatedGroup>
-          </Panel>
+          <ResearchTerminal
+            input={input}
+            pct={pct}
+            sources={sources}
+            done={done}
+            error={error}
+            onRetry={() => setAttempt((a) => a + 1)}
+          />
         </div>
         <div>
           <Panel className="sticky top-[120px] flex flex-col gap-4 p-5">
@@ -257,6 +212,90 @@ function Research() {
         </div>
       </div>
     </PageShell>
+  )
+}
+
+/** TinyFish agent log, replayed as a terminal session alongside the research steps. */
+function ResearchTerminal({
+  input,
+  pct,
+  sources,
+  done,
+  error,
+  onRetry,
+}: {
+  input: ResearchInput
+  pct: number
+  sources: number
+  done: boolean
+  error: string
+  onRetry: () => void
+}) {
+  const tabs: TabContent[] = useMemo(() => {
+    const steps = research.steps(input)
+    const all = research.sources(input)
+    const perStep = [1, 3, 1, 2, 0, 0]
+    let k = 0
+    const lines: TabContent["lines"] = []
+    steps.forEach((s, i) => {
+      lines.push({ text: `→ ${s.label}`, color: "text-white", delay: i ? 520 : 200 })
+      lines.push({ text: `  ${s.detail}`, color: "text-neutral-500", delay: 120 })
+      for (let n = 0; n < perStep[i] && k < all.length; n++, k++) {
+        const src = all[k]
+        lines.push({
+          text: `  ${src.kind.padEnd(6)} ${src.url}  ${(src.ms / 1000).toFixed(1)}s`,
+          color: src.kind === "search" ? "text-sky-300" : "text-emerald-300",
+          delay: 300,
+        })
+      }
+    })
+    const site = input.website || input.business
+    return [{ label: "research", command: `tinyfish research ${site}`, lines }]
+  }, [input])
+
+  return (
+    <div className="mt-[22px] overflow-hidden rounded-lg border border-stage-line bg-stage shadow-soft">
+      <div className="flex items-center gap-2 border-b border-stage-line px-4 py-2.5">
+        <span className="size-2.5 rounded-full bg-[#ff5f57]" />
+        <span className="size-2.5 rounded-full bg-[#febc2e]" />
+        <span className="size-2.5 rounded-full bg-[#28c840]" />
+        <span className="ml-2 font-mono text-[11.5px] text-stage-muted">tinyfish · web agent</span>
+        <span className="ml-auto flex items-baseline gap-1.5 font-mono text-[11.5px] text-stage-muted">
+          sources
+          <span className="text-stage-ink tabular-nums">
+            <RollingNumber value={sources} />
+          </span>
+        </span>
+      </div>
+      <div className="h-0.5 bg-stage-2">
+        <i className="block h-full bg-accent transition-[width] duration-500 ease-out" style={{ width: `${pct}%` }} />
+      </div>
+      <TerminalAnimationRoot tabs={tabs} alwaysDark hideCursorOnComplete={false}>
+        <TerminalAnimationWindow backgroundColor="var(--stage)" minHeight="19rem" animateOnVisible={false} className="rounded-none">
+          <TerminalAnimationContent className="px-5 py-4 font-mono text-[12.5px] leading-[1.7] sm:px-5 sm:py-4">
+            <TerminalAnimationCommandBar
+              className="text-stage-ink"
+              cursor={<TerminalAnimationBlinkingCursor className="bg-accent" />}
+            />
+            <TerminalAnimationOutput
+              className="mt-1 whitespace-pre-wrap break-all"
+              renderLine={(line, _i, visible) =>
+                visible ? <span className={line.color}>{line.text || " "}</span> : null
+              }
+            />
+            {done ? <div className="mt-1 text-accent">✓ brand profile saved</div> : null}
+            {error ? (
+              <div className="mt-2 flex flex-wrap items-center gap-2.5">
+                <span className="text-[#f2555a]">✗ couldn’t save the brand profile: {error}</span>
+                <Button size="sm" variant="stage" onClick={onRetry}>
+                  Try again
+                </Button>
+              </div>
+            ) : null}
+          </TerminalAnimationContent>
+        </TerminalAnimationWindow>
+      </TerminalAnimationRoot>
+    </div>
   )
 }
 

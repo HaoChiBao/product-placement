@@ -69,11 +69,16 @@ export default {
           from: { left: "-30%" },
           to: { left: "100%" },
         },
+        "caret-blink": {
+          "0%,70%,100%": { opacity: "1" },
+          "20%,50%": { opacity: "0" },
+        },
       },
       animation: {
         shimmer: "shimmer 1.2s linear infinite",
         spin: "spin 0.7s linear infinite",
         scan: "scan 1.1s linear infinite",
+        "caret-blink": "caret-blink 1.25s ease-out infinite",
       },
     },
   },

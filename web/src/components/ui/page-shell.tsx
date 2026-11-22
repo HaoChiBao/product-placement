@@ -1,3 +1,4 @@
+import { TextureOverlay } from "@/components/ui/texture-overlay"
 import { cn } from "@/lib/utils"
 
 export function PageShell({
@@ -10,15 +11,19 @@ export function PageShell({
   narrow?: boolean
 }) {
   return (
-    <main
-      className={cn(
-        "mx-auto w-full px-4 pb-16 pt-7 sm:px-6",
-        narrow ? "max-w-[1120px]" : "max-w-shell",
-        className
-      )}
-    >
-      {children}
-    </main>
+    <>
+      {/* Faint paper grain behind light pages so flat surfaces don't read as default UI */}
+      <TextureOverlay texture="paperGrain" opacity={0.12} className="fixed -z-10 dark:invert" />
+      <main
+        className={cn(
+          "mx-auto w-full px-4 pb-16 pt-7 sm:px-6",
+          narrow ? "max-w-[1120px]" : "max-w-shell",
+          className
+        )}
+      >
+        {children}
+      </main>
+    </>
   )
 }
 
