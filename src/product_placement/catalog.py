@@ -895,13 +895,15 @@ def _stream_store_to_file(store: ObjectStore, key: str, dest: Path) -> Path:
     return dest
 
 
-def _copy_object(store: ObjectStore, src_key: str, dest_key: str) -> bool:
+def _copy_object(
+    store: ObjectStore, src_key: str, dest_key: str, *, overwrite: bool = False
+) -> bool:
     """Copy one object to another key via a temp file. Returns True if copied."""
     if src_key == dest_key:
         return False
     if not store.exists(src_key):
         return False
-    if store.exists(dest_key):
+    if store.exists(dest_key) and not overwrite:
         return False
     with tempfile.TemporaryDirectory() as tmp:
         local = Path(tmp) / "obj"
@@ -978,33 +980,46 @@ def migrate_catalog_object_keys(conn: Connection | None = None) -> dict[str, Any
         # Moment frames: moments/<episode_id>/ → catalog/.../moments/
         moments = fetchall_dicts(
             conn,
-            "SELECT * FROM moments WHERE episode_id = ? ORDER BY start_s",
+            "SELECT * FROM moments WHERE episode_id = ? ORDER BY start_s, id",
             (ep["id"],),
         )
+        live_keys = {str(mom.get("frame_key") or "") for mom in moments}
         for i, mom in enumerate(moments, start=1):
-            old_key = mom.get("frame_key")
+            old_key = str(mom.get("frame_key") or "")
             new_key = moment_frame_key(slug, season, episode_n, i)
-            candidates = []
-            if old_key:
-                candidates.append(str(old_key))
-            candidates.append(legacy_moment_frame_key(str(ep["id"]), i))
-            src = next((c for c in candidates if store.exists(c)), None)
-            if not src:
+            if old_key and store.exists(old_key):
+                src = old_key
+            else:
+                legacy = legacy_moment_frame_key(str(ep["id"]), i)
+                src = legacy if store.exists(legacy) else ""
+            if not src or src == new_key:
+                if src == new_key:
+                    skipped += 1
                 continue
-            if src == new_key:
+            # A leftover moment_NN.jpg is an old still, not this row's image.
+            # Keep the row's object unless that index name still belongs to
+            # another moment, in which case renaming would swap the pictures.
+            dest_is_live = new_key in live_keys and new_key != old_key
+            if dest_is_live:
                 skipped += 1
                 continue
-            if _copy_object(store, src, new_key) or store.exists(new_key):
-                if src != new_key and store.exists(src):
-                    try:
-                        store.delete(src)
-                    except Exception:
-                        pass
-                conn.execute(
-                    "UPDATE moments SET frame_key = ? WHERE id = ?",
-                    (new_key, mom["id"]),
-                )
-                moved.append(f"moment:{mom['id']}")
+            copied = _copy_object(
+                store, src, new_key, overwrite=bool(old_key) and src == old_key
+            )
+            if not copied and not store.exists(new_key):
+                skipped += 1
+                continue
+            other_lives = live_keys - {old_key}
+            if src != new_key and src not in other_lives and store.exists(src):
+                try:
+                    store.delete(src)
+                except Exception:
+                    pass
+            conn.execute(
+                "UPDATE moments SET frame_key = ? WHERE id = ?",
+                (new_key, mom["id"]),
+            )
+            moved.append(f"moment:{mom['id']}")
 
     placements = fetchall_dicts(conn, "SELECT * FROM placements ORDER BY created_at")
     for pl in placements:
@@ -1587,7 +1602,7 @@ def replace_episode_moments(
     slug = str((title or {}).get("slug") or "title")
     season = int(ep.get("season") or 1)
     episode_n = int(ep.get("episode_number") or 1)
-    from product_placement.catalog_keys import episode_prefix
+    from product_placement.catalog_keys import episode_prefix, moment_frame_key
     from product_placement.object_store import get_object_store
 
     store = get_object_store()
@@ -1596,20 +1611,20 @@ def replace_episode_moments(
     for moment in moments:
         frame_path = _resolve_frame(moment, frames_dir)
         moment_id = new_id()
-        frame_key = None
+        staging_key = None
         blob = None
         if frame_path is not None:
-            frame_key = f"{prefix}/moments/{moment_id}.jpg"
+            staging_key = f"{prefix}/moments/_incoming/{moment_id}.jpg"
             blob = frame_path.read_bytes()
-        prepared.append((moment_id, moment, frame_key, blob))
-    for _moment_id, _moment, frame_key, blob in prepared:
-        if frame_key is None or blob is None:
+        prepared.append((moment_id, moment, staging_key, blob))
+    for _moment_id, _moment, staging_key, blob in prepared:
+        if staging_key is None or blob is None:
             continue
-        store.put_bytes(blob, frame_key, content_type="image/jpeg")
+        store.put_bytes(blob, staging_key, content_type="image/jpeg")
     try:
         conn.execute("DELETE FROM moments WHERE episode_id = ?", (episode_id,))
         stored: list[dict[str, Any]] = []
-        for moment_id, moment, frame_key, _blob in prepared:
+        for moment_id, moment, staging_key, _blob in prepared:
             row = insert_moment(
                 conn,
                 episode_id=episode_id,
@@ -1619,7 +1634,7 @@ def replace_episode_moments(
                 whats_there=str(moment.get("whats_there") or ""),
                 score=float(moment.get("score") or 0),
                 reason=str(moment.get("reason") or ""),
-                frame_key=frame_key,
+                frame_key=staging_key,
                 frame_w=int(moment.get("frame_w") or 0),
                 frame_h=int(moment.get("frame_h") or 0),
                 moment_id=moment_id,
@@ -1633,12 +1648,45 @@ def replace_episode_moments(
         conn.commit()
     except Exception:
         conn.rollback()
+        for _moment_id, _moment, staging_key, _blob in prepared:
+            if staging_key and store.exists(staging_key):
+                try:
+                    store.delete(staging_key)
+                except Exception:
+                    pass
         raise
+    blobs = {moment_id: blob for moment_id, _moment, _key, blob in prepared}
+    rows = fetchall_dicts(
+        conn,
+        "SELECT * FROM moments WHERE episode_id = ? ORDER BY start_s, id",
+        (episode_id,),
+    )
+    finals: set[str] = set()
+    for index, row in enumerate(rows, start=1):
+        blob = blobs.get(str(row["id"]))
+        if blob is None:
+            continue
+        final_key = moment_frame_key(slug, season, episode_n, index)
+        store.put_bytes(blob, final_key, content_type="image/jpeg")
+        conn.execute(
+            "UPDATE moments SET frame_key = ? WHERE id = ?",
+            (final_key, row["id"]),
+        )
+        row["frame_key"] = final_key
+        finals.add(final_key)
+    conn.commit()
+    for key in store.list_keys(f"{prefix}/moments/"):
+        if key in finals:
+            continue
+        try:
+            store.delete(key)
+        except Exception:
+            pass
     return {
         "episode_id": episode_id,
         "suggest_status": "ready",
-        "count": len(stored),
-        "moments": stored,
+        "count": len(rows),
+        "moments": rows,
     }
 
 
