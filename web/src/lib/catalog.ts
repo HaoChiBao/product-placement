@@ -26,11 +26,12 @@ function parseCatalogStdout(text: string, stderr: string): unknown {
   }
 }
 
-export function catalogCmd(args: string[]): unknown {
+export function catalogCmd(args: string[], stdin?: string): unknown {
   const res = spawnSync(pythonBin(), ["-m", "product_placement.catalog", ...args], {
     cwd: repoRoot(),
     env: pythonEnv(),
     encoding: "utf8",
+    input: stdin,
     maxBuffer: 32 * 1024 * 1024,
   })
   if (res.status !== 0) {
