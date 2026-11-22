@@ -185,7 +185,7 @@ def test_object_store_local_put_get_range(catalog_env):
     assert store.read_range(key, 0, 3) == b"abcd"
     assert store.read_range(key, 23, 25) == b"xyz"
     url = store.public_or_presigned_url(key)
-    assert url.startswith("file:")
+    assert url == "/api/media/demo/hello.txt"
 
 
 def test_migrate_file_brands(catalog_env, tmp_path):

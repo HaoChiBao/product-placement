@@ -623,6 +623,7 @@ def get_watch_payload(
     store = get_object_store()
     video_key = ep.get("video_key")
     video_url = store.public_or_presigned_url(video_key) if video_key else None
+    poster_key = ep.get("poster_key") or title.get("poster_key")
 
     placements: list[dict[str, Any]] = []
     sql = (
@@ -644,8 +645,8 @@ def get_watch_payload(
                 "brand_id": r["brand_id"],
                 "moment_id": r["moment_id"],
                 "status": r["status"],
-                "start_s": r["start_s"],
-                "end_s": r["end_s"],
+                "start_s": float(r["start_s"]),
+                "end_s": float(r["end_s"]),
                 "clip_key": clip_key,
                 "clip_url": store.public_or_presigned_url(clip_key) if clip_key else None,
                 "region": json.loads(r["region_json"]) if r.get("region_json") else None,
@@ -659,9 +660,9 @@ def get_watch_payload(
         "episode": ep,
         "video_key": video_key,
         "video_url": video_url,
-        "poster_key": ep.get("poster_key"),
+        "poster_key": poster_key,
         "poster_url": (
-            store.public_or_presigned_url(ep["poster_key"]) if ep.get("poster_key") else None
+            store.public_or_presigned_url(poster_key) if poster_key else None
         ),
         "placements": placements,
         "brand_id": brand_id,

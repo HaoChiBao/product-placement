@@ -20,9 +20,9 @@ const plexMono = IBM_Plex_Mono({
 })
 
 export const metadata: Metadata = {
-  title: "product-placement · suggest & swap",
+  title: "PlaceStream · product placement",
   description:
-    "Find face-free placement moments and run crop-and-stitch Seedance swaps",
+    "Provider catalog, brand placements, and a consumer watch experience",
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

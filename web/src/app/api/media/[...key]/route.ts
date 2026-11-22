@@ -1,0 +1,159 @@
+import fs from "fs"
+import path from "path"
+import { NextRequest, NextResponse } from "next/server"
+
+import { localObjectPath, usingS3 } from "@/lib/catalog"
+import { dataRoot } from "@/lib/runs"
+
+export const runtime = "nodejs"
+
+function safeKey(parts: string[]): string | null {
+  const key = parts.map((p) => decodeURIComponent(p)).join("/")
+  if (!key || key.includes("..")) return null
+  return key.replace(/^\/+/, "")
+}
+
+function contentTypeFor(key: string): string {
+  const ext = path.extname(key).toLowerCase()
+  return (
+    {
+      ".mp4": "video/mp4",
+      ".webm": "video/webm",
+      ".mov": "video/quicktime",
+      ".jpg": "image/jpeg",
+      ".jpeg": "image/jpeg",
+      ".png": "image/png",
+      ".webp": "image/webp",
+    }[ext] || "application/octet-stream"
+  )
+}
+
+async function s3Range(
+  key: string,
+  rangeHeader: string | null
+): Promise<NextResponse> {
+  const { S3Client, GetObjectCommand, HeadObjectCommand } = await import(
+    "@aws-sdk/client-s3"
+  )
+  const client = new S3Client({
+    region: process.env.AWS_DEFAULT_REGION || "us-east-1",
+    endpoint: process.env.AWS_ENDPOINT_URL_S3 || undefined,
+    forcePathStyle: false,
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID || "",
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || "",
+    },
+  })
+  const bucket = process.env.AWS_S3_BUCKET_NAME || ""
+  const head = await client.send(
+    new HeadObjectCommand({ Bucket: bucket, Key: key })
+  )
+  const size = Number(head.ContentLength || 0)
+  const type = head.ContentType || contentTypeFor(key)
+
+  if (rangeHeader) {
+    const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader)
+    if (m) {
+      const start = m[1] ? parseInt(m[1], 10) : 0
+      const end = m[2] ? parseInt(m[2], 10) : size - 1
+      const resp = await client.send(
+        new GetObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          Range: `bytes=${start}-${end}`,
+        })
+      )
+      const bytes = Buffer.from(await resp.Body!.transformToByteArray())
+      return new NextResponse(bytes, {
+        status: 206,
+        headers: {
+          "Content-Type": type,
+          "Content-Length": String(bytes.length),
+          "Content-Range": `bytes ${start}-${end}/${size}`,
+          "Accept-Ranges": "bytes",
+          "Cache-Control": "private, max-age=60",
+        },
+      })
+    }
+  }
+
+  const resp = await client.send(
+    new GetObjectCommand({ Bucket: bucket, Key: key })
+  )
+  const bytes = Buffer.from(await resp.Body!.transformToByteArray())
+  return new NextResponse(bytes, {
+    status: 200,
+    headers: {
+      "Content-Type": type,
+      "Content-Length": String(bytes.length),
+      "Accept-Ranges": "bytes",
+      "Cache-Control": "private, max-age=60",
+    },
+  })
+}
+
+export async function GET(
+  req: NextRequest,
+  ctx: { params: Promise<{ key: string[] }> }
+) {
+  const { key: parts } = await ctx.params
+  const key = safeKey(parts)
+  if (!key) {
+    return NextResponse.json({ error: "bad key" }, { status: 400 })
+  }
+
+  try {
+    if (usingS3()) {
+      return await s3Range(key, req.headers.get("range"))
+    }
+
+    const filePath = localObjectPath(key)
+    const root = path.resolve(dataRoot(), "objects")
+    if (!filePath.startsWith(root + path.sep) && filePath !== root) {
+      return NextResponse.json({ error: "forbidden" }, { status: 403 })
+    }
+    if (!fs.existsSync(filePath)) {
+      return NextResponse.json({ error: "not found" }, { status: 404 })
+    }
+    const stat = fs.statSync(filePath)
+    const size = stat.size
+    const type = contentTypeFor(key)
+    const range = req.headers.get("range")
+
+    if (range) {
+      const m = /bytes=(\d*)-(\d*)/.exec(range)
+      if (m) {
+        const start = m[1] ? parseInt(m[1], 10) : 0
+        const end = m[2] ? parseInt(m[2], 10) : size - 1
+        const chunk = Buffer.alloc(end - start + 1)
+        const fd = fs.openSync(filePath, "r")
+        fs.readSync(fd, chunk, 0, chunk.length, start)
+        fs.closeSync(fd)
+        return new NextResponse(chunk, {
+          status: 206,
+          headers: {
+            "Content-Type": type,
+            "Content-Length": String(chunk.length),
+            "Content-Range": `bytes ${start}-${end}/${size}`,
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "private, max-age=60",
+          },
+        })
+      }
+    }
+
+    const buf = fs.readFileSync(filePath)
+    return new NextResponse(buf, {
+      status: 200,
+      headers: {
+        "Content-Type": type,
+        "Content-Length": String(buf.length),
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=60",
+      },
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return NextResponse.json({ error: message }, { status: 500 })
+  }
+}

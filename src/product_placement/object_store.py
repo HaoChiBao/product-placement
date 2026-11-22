@@ -124,9 +124,10 @@ class LocalObjectStore(ObjectStore):
             path.unlink()
 
     def public_or_presigned_url(self, key: str, expires: int = 3600) -> str:
-        # Local: return a file:// URL or relative path marker for the API layer.
-        path = self._path(key).resolve()
-        return path.as_uri()
+        # Served by Next.js /api/media/[...key] with Range support.
+        from urllib.parse import quote
+
+        return "/api/media/" + quote(key.lstrip("/"), safe="/")
 
 
 class S3ObjectStore(ObjectStore):

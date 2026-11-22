@@ -9,7 +9,10 @@ export MODEL_CACHE_DIR="${MODEL_CACHE_DIR:-/app/models}"
 export HOSTNAME="${HOSTNAME:-0.0.0.0}"
 export PORT="${PORT:-3000}"
 
-mkdir -p "${DATA_DIR}/jobs"
+mkdir -p "${DATA_DIR}/jobs" "${DATA_DIR}/objects"
+
+# Initialize catalog schema (SQLite locally / Postgres when DATABASE_URL is set).
+"${PYTHON_BIN}" -m product_placement.catalog init-db || true
 
 SERVER_JS="/app/web-standalone/server.js"
 if [[ ! -f "${SERVER_JS}" ]]; then
