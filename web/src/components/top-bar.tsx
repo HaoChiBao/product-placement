@@ -14,7 +14,7 @@ const STEPS = [
 
 export type Step = (typeof STEPS)[number][0]
 
-export function TopBar({ step, nav }: { step?: Step; nav?: "videos" | "campaigns" }) {
+export function TopBar({ step, nav }: { step?: Step; nav?: "videos" | "campaigns" | "watch" }) {
   const [biz, setBiz] = useState("")
   useEffect(() => setBiz(session.get()?.profile.business || ""), [])
   const idx = STEPS.findIndex((s) => s[0] === step)
@@ -38,6 +38,9 @@ export function TopBar({ step, nav }: { step?: Step; nav?: "videos" | "campaigns
           </Link>
           <Link href="/campaigns" aria-current={nav === "campaigns" ? "page" : undefined}>
             Campaigns
+          </Link>
+          <Link href="/watch" aria-current={nav === "watch" ? "page" : undefined}>
+            Watch
           </Link>
         </nav>
         <div className="top-sp" />
