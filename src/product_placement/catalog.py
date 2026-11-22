@@ -1891,7 +1891,10 @@ def upsert_placement(
     episode_id: str | None = None,
     test_mode: int = 1,
     placement_id: str | None = None,
+    generate: bool = True,
 ) -> dict[str, Any]:
+    """Record a brand's call on a moment. With `generate`, approving queues the swap
+    (`spawn` in the result); without it, approving only stores `approved`."""
     status = status.strip().lower()
     if status not in {"approved", "rejected", "queued", "rendering", "ready", "failed"}:
         raise ValueError(f"invalid status: {status}")
@@ -1910,7 +1913,7 @@ def upsert_placement(
     spawn = False
     if existing:
         cur = str(existing.get("status") or "")
-        if status == "approved":
+        if status == "approved" and generate:
             held = bool(str(existing.get("error") or "").strip())
             # Already in-flight or done — do not re-queue (avoids double Seedance bills).
             # Exception: queued/failed with an error (e.g. key missing) may retry.
@@ -1934,7 +1937,7 @@ def upsert_placement(
         return row
 
     pid = placement_id or new_id()
-    new_status = "queued" if status == "approved" else status
+    new_status = "queued" if status == "approved" and generate else status
     spawn = new_status == "queued"
     conn.execute(
         "INSERT INTO placements (id, brand_id, moment_id, episode_id, status, clip_key, "
@@ -2917,6 +2920,7 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--brand-id", required=True)
     up.add_argument("--moment-id", required=True)
     up.add_argument("--status", required=True, choices=("approved", "rejected"))
+    up.add_argument("--no-generate", action="store_true", help="approve without queueing the swap")
 
     uppl = add("update-placement")
     uppl.add_argument("--id", required=True)
@@ -3124,6 +3128,7 @@ def main(argv: list[str] | None = None) -> None:
                 brand_id=args.brand_id,
                 moment_id=args.moment_id,
                 status=args.status,
+                generate=not args.no_generate,
             )
             try:
                 refresh_campaign_for_placement(conn, row["id"])

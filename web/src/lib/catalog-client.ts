@@ -181,7 +181,7 @@ export async function listPlacements(brandId: string, episodeId?: string): Promi
   return placements || []
 }
 
-/** Approving queues the real placement-swap path when keys allow; otherwise holds queued. */
+/** A yes/no call on a spot. Only the decision is saved; no product is placed. */
 export async function decidePlacement(
   brandId: string,
   momentId: string,
@@ -190,7 +190,7 @@ export async function decidePlacement(
   return getJson<Placement>("/api/catalog/placements", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ brandId, momentId, status, confirm: true }),
+    body: JSON.stringify({ brandId, momentId, status, generate: false }),
   })
 }
 

@@ -152,6 +152,18 @@
     padding: 3px 5px;
     border-radius: 3px 3px 3px 0;
   }
+  .det[data-st="approved"] {
+    border: 2px solid var(--success);
+  }
+  .det[data-st="approved"] span {
+    background: var(--success);
+  }
+  .det[data-st="rejected"] {
+    border-color: #e5484d;
+  }
+  .det[data-st="rejected"] span {
+    background: #e5484d;
+  }
 
   /* Review stage (always dark chrome) */
   .ap {
@@ -212,10 +224,10 @@
     box-shadow: 0 0 0 2px var(--stage);
   }
   .ap-mk[data-st="queued"],
-  .ap-mk[data-st="rendering"],
-  .ap-mk[data-st="approved"] {
+  .ap-mk[data-st="rendering"] {
     background: #e6a24a;
   }
+  .ap-mk[data-st="approved"],
   .ap-mk[data-st="ready"] {
     background: var(--success);
   }

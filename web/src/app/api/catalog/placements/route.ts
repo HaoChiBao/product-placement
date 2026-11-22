@@ -38,6 +38,8 @@ export async function POST(req: NextRequest) {
       testMode?: boolean
       confirm?: boolean
       method?: string
+      /** false: record the yes/no call only; approving queues no swap. */
+      generate?: boolean
     }
     if (!body.brandId || !body.momentId || !body.status) {
       return NextResponse.json(
@@ -46,11 +48,12 @@ export async function POST(req: NextRequest) {
       )
     }
 
+    const generate = body.generate !== false
     const plan = planGeneration({
       testMode: body.testMode,
       method: resolveSwapMethod(body.method),
     })
-    if (body.status === "approved" && !plan.testMode && !body.confirm) {
+    if (generate && body.status === "approved" && !plan.testMode && !body.confirm) {
       return NextResponse.json(
         {
           error:
@@ -68,6 +71,7 @@ export async function POST(req: NextRequest) {
       body.momentId,
       "--status",
       body.status,
+      ...(generate ? [] : ["--no-generate"]),
     ]) as {
       id: string
       status: string
