@@ -64,7 +64,7 @@ export function spawnEpisodeSuggest(episodeId: string): void {
 
 export function spawnPlacementSwap(
   placementId: string,
-  opts?: { testMode?: boolean; confirm?: boolean }
+  opts?: { testMode?: boolean; confirm?: boolean; method?: "wan" | "higgsfield" }
 ): void {
   const testMode = opts?.testMode !== false
   const args = [
@@ -77,6 +77,7 @@ export function spawnPlacementSwap(
   if (testMode) args.push("--test-mode")
   else args.push("--no-test-mode")
   if (opts?.confirm !== false) args.push("--confirm")
+  if (opts?.method) args.push("--method", opts.method)
   spawnJob(args, {})
 }
 
