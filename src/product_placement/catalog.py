@@ -1508,6 +1508,7 @@ def insert_moment(
     frame_w: int = 0,
     frame_h: int = 0,
     moment_id: str | None = None,
+    commit: bool = True,
 ) -> dict[str, Any]:
     mid = moment_id or new_id()
     region_json = region if isinstance(region, str) else json.dumps(region)
@@ -1528,12 +1529,14 @@ def insert_moment(
             int(frame_h or 0),
         ),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return fetchone_dict(conn, "SELECT * FROM moments WHERE id = ?", (mid,))  # type: ignore[return-value]
 
 
 _JOB_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{3}$")
 _EPISODE_ID = re.compile(r"^[0-9a-f]{12}$")
+_FRAME_NAME = re.compile(r"^moment_\d{2}\.jpg$")
 
 
 def _as_region(raw: Any) -> dict[str, int]:
@@ -1553,17 +1556,18 @@ def _as_region(raw: Any) -> dict[str, int]:
 
 
 def _resolve_frame(moment: dict[str, Any], frames_dir: Path | None) -> Path | None:
+    """Stills come only from frames_dir, by moment_XX.jpg basename."""
+    if frames_dir is None:
+        return None
     raw = str(moment.get("frame") or moment.get("_frame_path") or "")
-    name = Path(raw).name if raw else ""
-    candidates: list[Path] = []
-    if raw:
-        candidates.append(Path(raw))
-    if frames_dir is not None and name:
-        candidates.append(frames_dir / name)
-    for path in candidates:
-        if path.is_file():
-            return path
-    return None
+    name = Path(raw).name
+    if not _FRAME_NAME.match(name):
+        return None
+    root = frames_dir.resolve()
+    path = (root / name).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return None
+    return path
 
 
 def replace_episode_moments(
@@ -1583,38 +1587,53 @@ def replace_episode_moments(
     slug = str((title or {}).get("slug") or "title")
     season = int(ep.get("season") or 1)
     episode_n = int(ep.get("episode_number") or 1)
-    from product_placement.catalog_keys import moment_frame_key
+    from product_placement.catalog_keys import episode_prefix
     from product_placement.object_store import get_object_store
 
     store = get_object_store()
-    conn.execute("DELETE FROM moments WHERE episode_id = ?", (episode_id,))
-    conn.commit()
-    stored: list[dict[str, Any]] = []
-    for index, moment in enumerate(moments, start=1):
+    prefix = episode_prefix(slug, season, episode_n)
+    prepared: list[tuple[str, dict[str, Any], str | None, bytes | None]] = []
+    for moment in moments:
         frame_path = _resolve_frame(moment, frames_dir)
+        moment_id = new_id()
         frame_key = None
+        blob = None
         if frame_path is not None:
-            frame_key = moment_frame_key(slug, season, episode_n, index)
-            store.put_file(frame_path, frame_key, content_type="image/jpeg")
-        row = insert_moment(
-            conn,
-            episode_id=episode_id,
-            start_s=float(moment.get("start_s") or 0),
-            end_s=float(moment.get("end_s") or 0),
-            region=_as_region(moment.get("region")),
-            whats_there=str(moment.get("whats_there") or ""),
-            score=float(moment.get("score") or 0),
-            reason=str(moment.get("reason") or ""),
-            frame_key=frame_key,
-            frame_w=int(moment.get("frame_w") or 0),
-            frame_h=int(moment.get("frame_h") or 0),
+            frame_key = f"{prefix}/moments/{moment_id}.jpg"
+            blob = frame_path.read_bytes()
+        prepared.append((moment_id, moment, frame_key, blob))
+    for _moment_id, _moment, frame_key, blob in prepared:
+        if frame_key is None or blob is None:
+            continue
+        store.put_bytes(blob, frame_key, content_type="image/jpeg")
+    try:
+        conn.execute("DELETE FROM moments WHERE episode_id = ?", (episode_id,))
+        stored: list[dict[str, Any]] = []
+        for moment_id, moment, frame_key, _blob in prepared:
+            row = insert_moment(
+                conn,
+                episode_id=episode_id,
+                start_s=float(moment.get("start_s") or 0),
+                end_s=float(moment.get("end_s") or 0),
+                region=_as_region(moment.get("region")),
+                whats_there=str(moment.get("whats_there") or ""),
+                score=float(moment.get("score") or 0),
+                reason=str(moment.get("reason") or ""),
+                frame_key=frame_key,
+                frame_w=int(moment.get("frame_w") or 0),
+                frame_h=int(moment.get("frame_h") or 0),
+                moment_id=moment_id,
+                commit=False,
+            )
+            stored.append(row)
+        conn.execute(
+            "UPDATE episodes SET suggest_status = ? WHERE id = ?",
+            ("ready", episode_id),
         )
-        stored.append(row)
-    conn.execute(
-        "UPDATE episodes SET suggest_status = ? WHERE id = ?",
-        ("ready", episode_id),
-    )
-    conn.commit()
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     return {
         "episode_id": episode_id,
         "suggest_status": "ready",

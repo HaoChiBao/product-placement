@@ -40,9 +40,10 @@ def catalog_env(tmp_path, monkeypatch):
     reset_object_store()
 
 
-def _jpeg(path: Path) -> None:
-    ok, buf = cv2.imencode(".jpg", np.full((8, 8, 3), 32, np.uint8))
+def _jpeg(path: Path, value: int) -> None:
+    ok, buf = cv2.imencode(".jpg", np.full((8, 8, 3), value, np.uint8))
     assert ok
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(buf.tobytes())
 
 
@@ -78,8 +79,9 @@ def test_adopt_suggest_job_replaces_surface_spots(catalog_env):
     job_id = "24aa1f69-134"
     job = data / "jobs" / job_id
     frames = job / "frames"
-    frames.mkdir(parents=True)
-    _jpeg(frames / "moment_01.jpg")
+    _jpeg(frames / "moment_01.jpg", 32)
+    outside = data / "moment_01.jpg"
+    _jpeg(outside, 200)
     (job / "moments.json").write_text(
         json.dumps(
             {
@@ -88,7 +90,7 @@ def test_adopt_suggest_job_replaces_surface_spots(catalog_env):
                         {
                             "start_s": 55.182,
                             "end_s": 57.201,
-                            "frame": "/data/jobs/24aa1f69-134/frames/moment_01.jpg",
+                            "frame": str(outside),
                             "frame_w": 1920,
                             "frame_h": 1080,
                             "region": {"x": 680, "y": 797, "w": 211, "h": 112},
@@ -107,8 +109,69 @@ def test_adopt_suggest_job_replaces_surface_spots(catalog_env):
     rows = list_moments(conn, episode_id=episode_id)
     assert [row["whats_there"] for row in rows] == ["plate with bread"]
     assert rows[0]["region"] == {"x": 680, "y": 797, "w": 211, "h": 112}
-    assert rows[0]["frame_key"] == "catalog/obsession/s01e01/moments/moment_01.jpg"
-    assert get_object_store().exists(rows[0]["frame_key"])
+    assert rows[0]["frame_key"].startswith("catalog/obsession/s01e01/moments/")
+    assert rows[0]["frame_key"].endswith(".jpg")
+    with get_object_store().open_stream(rows[0]["frame_key"]) as handle:
+        stored = handle.read()
+    assert stored == (frames / "moment_01.jpg").read_bytes()
+    assert stored != outside.read_bytes()
 
     with pytest.raises(ValueError, match="invalid job id"):
         adopt_suggest_job(conn, episode_id=episode_id, job_id="../etc/passwd")
+
+
+def test_failed_upload_keeps_existing_moments(catalog_env, monkeypatch):
+    conn, data = catalog_env
+    title = create_title(conn, name="Home Alone", kind="movie", source="hosted")
+    episode_id = "f507d5d1ce0f"
+    conn.execute(
+        "INSERT INTO episodes (id, title_id, season, episode_number, name, video_key, "
+        "duration_s, suggest_status, created_at) VALUES (?, ?, 1, 1, ?, ?, ?, ?, ?)",
+        (
+            episode_id,
+            title["id"],
+            "Home Alone",
+            "catalog/home-alone/s01e01/original.mp4",
+            145.0,
+            "ready",
+            utc_now(),
+        ),
+    )
+    conn.commit()
+    insert_moment(
+        conn,
+        episode_id=episode_id,
+        start_s=1.0,
+        end_s=2.0,
+        region={"x": 0, "y": 0, "w": 10, "h": 10},
+        whats_there="wooden floor",
+        score=0.8,
+    )
+    job_id = "6d0cd540-ae4"
+    frames = data / "jobs" / job_id / "frames"
+    _jpeg(frames / "moment_01.jpg", 32)
+    (data / "jobs" / job_id / "moments.json").write_text(
+        json.dumps(
+            {
+                "moments": [
+                    {
+                        "start_s": 63.0,
+                        "end_s": 64.0,
+                        "frame": "moment_01.jpg",
+                        "region": {"x": 1, "y": 1, "w": 2, "h": 2},
+                        "whats_there": "paint can",
+                        "score": 0.9,
+                    }
+                ]
+            }
+        )
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("store down")
+
+    monkeypatch.setattr(get_object_store(), "put_bytes", _boom)
+    with pytest.raises(OSError, match="store down"):
+        adopt_suggest_job(conn, episode_id=episode_id, job_id=job_id)
+    rows = list_moments(conn, episode_id=episode_id)
+    assert [row["whats_there"] for row in rows] == ["wooden floor"]

@@ -47,24 +47,28 @@ export async function POST(req: NextRequest) {
       const staging = path.join(dataRoot(), "_upload", `adopt_${Date.now()}`)
       const framesDir = path.join(staging, "frames")
       fs.mkdirSync(framesDir, { recursive: true })
-      const momentsPath = path.join(staging, "moments.json")
-      fs.writeFileSync(momentsPath, momentsRaw)
-      for (const [key, value] of form.entries()) {
-        if (!(value instanceof File)) continue
-        if (!/^moment_\d{2}\.jpg$/.test(value.name || key)) continue
-        const name = value.name || key
-        fs.writeFileSync(path.join(framesDir, name), Buffer.from(await value.arrayBuffer()))
+      try {
+        const momentsPath = path.join(staging, "moments.json")
+        fs.writeFileSync(momentsPath, momentsRaw)
+        for (const [key, value] of form.entries()) {
+          if (!(value instanceof File)) continue
+          const name = value.name || key
+          if (!/^moment_\d{2}\.jpg$/.test(name)) continue
+          fs.writeFileSync(path.join(framesDir, name), Buffer.from(await value.arrayBuffer()))
+        }
+        const saved = catalogCmd([
+          "replace-moments",
+          "--episode-id",
+          episodeId,
+          "--moments-json",
+          momentsPath,
+          "--frames-dir",
+          framesDir,
+        ])
+        return NextResponse.json(saved)
+      } finally {
+        fs.rmSync(staging, { recursive: true, force: true })
       }
-      const saved = catalogCmd([
-        "replace-moments",
-        "--episode-id",
-        episodeId,
-        "--moments-json",
-        momentsPath,
-        "--frames-dir",
-        framesDir,
-      ])
-      return NextResponse.json(saved)
     }
 
     const body = (await req.json()) as { episodeId?: string; jobId?: string }
