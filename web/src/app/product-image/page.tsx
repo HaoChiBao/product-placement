@@ -231,8 +231,10 @@ function ProductImage() {
         <p className="mt-2 text-muted-foreground">
           {savedBefore
             ? "This is what you saved with your brand. Pick another image to change it."
-            : nothing
-              ? "We couldn’t find a clean product image on your site. Upload one, or continue without it."
+            : nothing && !jobId
+              ? "This was a simulated research run (no TinyFish key), so we didn’t look for images. Upload one, or continue without it."
+              : nothing
+                ? "We couldn’t find a clean product image on your site. Upload one, or continue without it."
               : "This is the image we’ll place into creator videos. A transparent cutout blends in best."}
         </p>
 

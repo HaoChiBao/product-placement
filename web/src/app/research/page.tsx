@@ -53,6 +53,8 @@ function Research() {
   const [error, setError] = useState("")
   const [attempt, setAttempt] = useState(0)
   const [jobId, setJobId] = useState("")
+  // Best product image the job found, for the board when nothing was uploaded or saved.
+  const [foundImage, setFoundImage] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -62,6 +64,11 @@ function Research() {
       setSources(0)
       setProfile(null)
       setJobId("")
+      setFoundImage(null)
+      const showFound = (id: string, job: ResearchJob) => {
+        const best = job.images?.[0]
+        if (best) setFoundImage(`/api/jobs/${encodeURIComponent(id)}/file/${best.name}`)
+      }
       let p: BrandProfile
       let n = mockSteps.length
 
@@ -96,6 +103,7 @@ function Research() {
         }
         if (!job || cancelled) return
         if (!same || saved?.jobId !== reviewJob) setFlow({ input, jobId: reviewJob })
+        showFound(reviewJob, job)
         setJobId(reviewJob)
         setStepIdx(job.steps.length)
         setProfile(job.profile)
@@ -145,6 +153,7 @@ function Research() {
         forgetResearch(input, attempt)
         p = job.profile!
         n = job.steps.length
+        showFound(started.jobId, job)
         setJobId(started.jobId)
         setFlow({ input, jobId: started.jobId })
       } else {
@@ -273,7 +282,7 @@ function Research() {
 
         <BrandMoodboard
           product={input.product}
-          productImage={productImage}
+          productImage={productImage || foundImage}
           sources={allSources.slice(0, sources)}
           profile={profile}
         />
