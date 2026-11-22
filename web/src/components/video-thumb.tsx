@@ -7,7 +7,12 @@ export function VideoThumb({ v, children }: { v: Video; children?: React.ReactNo
   const poster = mediaUrl(v.poster_key || v.title.poster_key)
   return (
     <div className="thumb">
-      {poster ? <img src={poster} alt="" /> : <div className="thumb-ph" />}
+      {poster ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={poster} alt="" />
+      ) : (
+        <div className="thumb-ph" />
+      )}
       {children}
     </div>
   )
