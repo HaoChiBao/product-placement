@@ -48,7 +48,7 @@ export default function WatchHomePage() {
   const [seeding, setSeeding] = useState(false)
 
   async function load() {
-    const res = await fetch("/api/catalog/titles")
+    const res = await fetch("/api/catalog/titles?watchable=1")
     const data = await res.json()
     if (!res.ok) throw new Error(data.error || "failed")
     const list = (data.titles || []) as Title[]
@@ -58,7 +58,11 @@ export default function WatchHomePage() {
       list.map(async (t) => {
         const er = await fetch(`/api/catalog/titles/${t.id}/episodes`)
         const ed = await er.json()
-        map[t.id] = ed.episodes || []
+        // Hide in-progress imports from the rail.
+        map[t.id] = (ed.episodes || []).filter(
+          (ep: Episode & { suggest_status?: string }) =>
+            (ep.suggest_status || "") !== "processing"
+        )
       })
     )
     setEpisodes(map)
@@ -151,9 +155,11 @@ export default function WatchHomePage() {
             </h1>
             <p className="mt-2 max-w-xl text-sm text-zinc-400">
               Movies and shows live in the catalog before anyone opens the app.
-              Drop a file at{" "}
+              Drop uploads in{" "}
+              <span className="font-mono text-zinc-300">movies/</span>, or place
+              a playable file at{" "}
               <span className="font-mono text-zinc-300">
-                catalog/&lt;slug&gt;/s01e01/video.mp4
+                catalog/&lt;slug&gt;/s01e01/original.mp4
               </span>{" "}
               (poster next to it), then register the title. A movie is one
               episode; a show is a season of them.

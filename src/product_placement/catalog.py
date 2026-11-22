@@ -8,8 +8,11 @@ import logging
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -24,34 +27,67 @@ from product_placement.db import (
     new_id,
     utc_now,
 )
-from product_placement.object_store import get_object_store
+from product_placement.catalog_keys import (
+    catalog_episode_prefix,
+    catalog_poster_key,
+    catalog_title_poster_key,
+    catalog_video_key,
+    original_video_key,
+    slugify,
+)
+from product_placement.object_store import ObjectStore, get_object_store
 
 log = logging.getLogger(__name__)
 
 ATTRIBUTION_BLENDER = "CC-BY Blender Foundation"
 
 
-def slugify(name: str) -> str:
-    s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return s or "title"
+def _configure_catalog_logging() -> None:
+    """Send catalog logs to stdout so Railway/docker captures them."""
+    root = logging.getLogger()
+    if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+        logging.basicConfig(
+            level=logging.INFO,
+            format="[catalog] %(levelname)s %(message)s",
+            stream=sys.stdout,
+            force=True,
+        )
+    log.setLevel(logging.INFO)
 
 
-def catalog_episode_prefix(slug: str, season: int, episode: int) -> str:
-    """Stable object prefix so a preload can land before the row exists."""
-    return f"catalog/{slug}/s{int(season):02d}e{int(episode):02d}"
+def seed_log(msg: str, *args: Any) -> None:
+    text = msg % args if args else msg
+    print(f"[catalog-seed] {text}", flush=True)
+    log.info("%s", text)
 
 
-def catalog_video_key(slug: str, season: int, episode: int, ext: str = ".mp4") -> str:
-    suffix = ext if ext.startswith(".") else f".{ext}"
-    return f"{catalog_episode_prefix(slug, season, episode)}/video{suffix}"
+def humanize_movie_filename(filename: str) -> str:
+    """`the_matrix.mp4` → 'The Matrix'."""
+    stem = Path(filename).stem
+    cleaned = re.sub(r"[_\.\-]+", " ", stem)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned.title() if cleaned else "Untitled"
 
 
-def catalog_poster_key(slug: str, season: int, episode: int) -> str:
-    return f"{catalog_episode_prefix(slug, season, episode)}/poster.jpg"
-
-
-def catalog_title_poster_key(slug: str) -> str:
-    return f"catalog/{slug}/poster.jpg"
+MOVIES_PREFIX = "movies/"
+MOVIE_VIDEO_EXTS = {
+    ".mp4",
+    ".m4v",
+    ".mov",
+    ".mkv",
+    ".webm",
+    ".avi",
+    ".wmv",
+    ".flv",
+    ".ts",
+    ".mpg",
+    ".mpeg",
+}
+# Mean luma below this is treated as near-black (0–255 scale).
+MIN_POSTER_MEAN_LUMA = 18.0
+BROWSER_SAFE_VIDEO = {"h264", "avc1", "avc", "h.264"}
+BROWSER_SAFE_AUDIO = {"aac", "mp3", "alac"}
+MP4_LIKE_FORMATS = {"mp4", "m4v"}
 
 
 # ---------------------------------------------------------------------------
@@ -59,8 +95,20 @@ def catalog_title_poster_key(slug: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def list_titles(conn: Connection) -> list[dict[str, Any]]:
-    return fetchall_dicts(conn, "SELECT * FROM titles ORDER BY created_at")
+def list_titles(
+    conn: Connection, *, watchable_only: bool = False
+) -> list[dict[str, Any]]:
+    if not watchable_only:
+        return fetchall_dicts(conn, "SELECT * FROM titles ORDER BY created_at")
+    # Playable originals only — hide orphan titles and in-progress imports.
+    return fetchall_dicts(
+        conn,
+        "SELECT DISTINCT t.* FROM titles t "
+        "INNER JOIN episodes e ON e.title_id = t.id "
+        "WHERE e.video_key IS NOT NULL AND TRIM(e.video_key) != '' "
+        "AND COALESCE(e.suggest_status, '') != 'processing' "
+        "ORDER BY t.created_at",
+    )
 
 
 def get_title(
@@ -119,16 +167,31 @@ def get_episode(conn: Connection, *, id: str) -> dict[str, Any] | None:
     return fetchone_dict(conn, "SELECT * FROM episodes WHERE id = ?", (id,))
 
 
-def _extract_poster_frame(video_path: Path, dest: Path, *, at_s: float = 1.0) -> Path:
+def _mean_luma(image_path: Path) -> float:
+    """Average luma (0–255). Returns 0 when the image cannot be read."""
+    try:
+        import cv2
+
+        img = cv2.imread(str(image_path))
+        if img is None:
+            return 0.0
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        return float(gray.mean())
+    except Exception:
+        return 0.0
+
+
+def _try_extract_frame_at(video_path: Path, dest: Path, at_s: float) -> bool:
+    """Write a single frame at at_s into dest. True on success."""
     dest.parent.mkdir(parents=True, exist_ok=True)
-    # Prefer ffmpeg; fall back to OpenCV.
+    dest.unlink(missing_ok=True)
     try:
         subprocess.run(
             [
                 "ffmpeg",
                 "-y",
                 "-ss",
-                str(at_s),
+                str(max(0.0, float(at_s))),
                 "-i",
                 str(video_path),
                 "-frames:v",
@@ -141,30 +204,69 @@ def _extract_poster_frame(video_path: Path, dest: Path, *, at_s: float = 1.0) ->
             capture_output=True,
         )
         if dest.is_file() and dest.stat().st_size > 0:
-            return dest
+            return True
     except (FileNotFoundError, subprocess.CalledProcessError):
         pass
 
-    import cv2
+    try:
+        import cv2
 
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        raise RuntimeError(f"cannot open video: {video_path}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-    for try_s in (at_s, 0.0, 0.1):
-        frame_i = int(try_s * fps)
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            return False
+        fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+        frame_i = int(max(0.0, float(at_s)) * fps)
         cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, frame_i))
         ok, frame = cap.read()
+        cap.release()
         if ok and frame is not None:
-            cap.release()
             cv2.imwrite(str(dest), frame)
-            return dest
-    cap.release()
-    # Last resort: copy a 1x1 jpeg so episode creation still succeeds.
-    import numpy as np
+            return dest.is_file() and dest.stat().st_size > 0
+    except Exception:
+        pass
+    return False
 
-    cv2.imwrite(str(dest), np.zeros((64, 64, 3), dtype=np.uint8))
-    return dest
+
+def _extract_poster_frame(
+    video_path: Path,
+    dest: Path,
+    *,
+    at_s: float = 1.0,
+    duration_s: float | None = None,
+    min_luma: float = MIN_POSTER_MEAN_LUMA,
+) -> Path:
+    """Grab a non-near-black frame. Tries ~10%, 25%, 50% of duration."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dur = float(duration_s) if duration_s is not None else _probe_duration(video_path)
+    if dur and dur > 0:
+        times = [dur * frac for frac in (0.10, 0.25, 0.50)]
+    else:
+        times = [float(at_s), 2.0, 5.0]
+
+    best_path: Path | None = None
+    best_luma = -1.0
+    best_ok_path: Path | None = None
+    best_ok_luma = -1.0
+
+    with tempfile.TemporaryDirectory() as tmp:
+        for i, t in enumerate(times):
+            candidate = Path(tmp) / f"frame_{i}.jpg"
+            if not _try_extract_frame_at(video_path, candidate, t):
+                continue
+            luma = _mean_luma(candidate)
+            if luma > best_luma:
+                best_luma = luma
+                best_path = candidate
+            if luma >= min_luma and luma > best_ok_luma:
+                best_ok_luma = luma
+                best_ok_path = candidate
+
+        chosen = best_ok_path or best_path
+        if chosen is not None:
+            dest.write_bytes(chosen.read_bytes())
+            return dest
+
+    raise RuntimeError(f"cannot extract poster frame from {video_path}")
 
 
 def _probe_duration(video_path: Path) -> float:
@@ -222,30 +324,57 @@ def create_episode(
         vp = Path(video_path)
         if not vp.is_file():
             raise FileNotFoundError(f"video not found: {vp}")
-        vkey = vkey or catalog_video_key(slug, season, episode, vp.suffix or ".mp4")
-        store.put_file(vp, vkey, content_type=_video_content_type(vp))
+        vkey = vkey or original_video_key(slug, season, episode)
+        store.put_file(vp, vkey, content_type="video/mp4")
         dur = dur if dur is not None else _probe_duration(vp)
         with tempfile.TemporaryDirectory() as tmp:
             poster = Path(tmp) / "poster.jpg"
-            _extract_poster_frame(vp, poster, at_s=1.0)
-            pkey = pkey or catalog_poster_key(slug, season, episode)
-            store.put_file(poster, pkey, content_type="image/jpeg")
-            title_poster = catalog_title_poster_key(slug)
-            if not title.get("poster_key"):
-                store.put_file(poster, title_poster, content_type="image/jpeg")
-                conn.execute(
-                    "UPDATE titles SET poster_key = ? WHERE id = ?",
-                    (title_poster, title_id),
-                )
+            try:
+                _extract_poster_frame(vp, poster, at_s=1.0, duration_s=dur)
+                pkey = pkey or catalog_poster_key(slug, season, episode)
+                store.put_file(poster, pkey, content_type="image/jpeg")
+                title_poster = catalog_title_poster_key(slug)
+                if not title.get("poster_key") or not store.exists(
+                    str(title["poster_key"])
+                ):
+                    store.put_file(poster, title_poster, content_type="image/jpeg")
+                    conn.execute(
+                        "UPDATE titles SET poster_key = ? WHERE id = ?",
+                        (title_poster, title_id),
+                    )
+            except Exception as exc:
+                log.warning("poster extract failed for %s: %s", vp, exc)
+                pkey = pkey if (pkey and store.exists(pkey)) else None
     elif vkey:
         if not store.exists(vkey):
             raise FileNotFoundError(
                 f"object not in store: {vkey} "
-                f"(expected {catalog_video_key(slug, season, episode)})"
+                f"(expected {original_video_key(slug, season, episode)})"
             )
         pkey = pkey or catalog_poster_key(slug, season, episode)
         if not store.exists(pkey):
-            pkey = None
+            # Download once and build a poster (same path as seed / movies import).
+            try:
+                with tempfile.TemporaryDirectory() as tmp:
+                    suffix = Path(str(vkey)).suffix or ".mp4"
+                    local = Path(tmp) / f"video{suffix}"
+                    store.get_file(vkey, local)
+                    dur = dur if dur is not None else _probe_duration(local)
+                    poster = Path(tmp) / "poster.jpg"
+                    _extract_poster_frame(local, poster, duration_s=dur)
+                    store.put_file(poster, pkey, content_type="image/jpeg")
+                    title_poster = catalog_title_poster_key(slug)
+                    if not title.get("poster_key") or not store.exists(
+                        str(title["poster_key"])
+                    ):
+                        store.put_file(poster, title_poster, content_type="image/jpeg")
+                        conn.execute(
+                            "UPDATE titles SET poster_key = ? WHERE id = ?",
+                            (title_poster, title_id),
+                        )
+            except Exception as exc:
+                log.warning("poster extract failed for %s: %s", vkey, exc)
+                pkey = None
 
     now = utc_now()
     conn.execute(
@@ -294,7 +423,7 @@ def register_preloaded_episode(
             attribution=attribution,
             slug=slug_val,
         )
-    key = video_key or catalog_video_key(slug_val, season, episode)
+    key = video_key or original_video_key(slug_val, season, episode)
     prior = fetchone_dict(
         conn,
         "SELECT id FROM episodes WHERE title_id = ? AND season = ? AND episode_number = ?",
@@ -323,9 +452,622 @@ def _video_content_type(path: Path) -> str:
     return {
         ".mp4": "video/mp4",
         ".mov": "video/quicktime",
+        ".m4v": "video/x-m4v",
         ".webm": "video/webm",
         ".avi": "video/x-msvideo",
     }.get(path.suffix.lower(), "application/octet-stream")
+
+
+def _poster_object_is_usable(store: Any, poster_key: str | None) -> bool:
+    if not poster_key or not store.exists(poster_key):
+        return False
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / "poster.jpg"
+            store.get_file(poster_key, local)
+            return _mean_luma(local) >= MIN_POSTER_MEAN_LUMA
+    except Exception:
+        return False
+
+
+def ensure_episode_poster(
+    conn: Connection,
+    episode_id: str,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Build / refresh episode + title posters from the episode video."""
+    ep = get_episode(conn, id=episode_id)
+    if not ep:
+        raise ValueError(f"episode not found: {episode_id}")
+    title = get_title(conn, id=str(ep["title_id"]))
+    if not title:
+        raise ValueError(f"title not found for episode {episode_id}")
+    video_key = ep.get("video_key")
+    if not video_key:
+        return {"skipped": True, "reason": "no video_key", "episode_id": episode_id}
+
+    store = get_object_store()
+    slug = str(title.get("slug") or "title")
+    season = int(ep["season"])
+    episode_n = int(ep["episode_number"])
+    ep_poster = ep.get("poster_key")
+    title_poster = title.get("poster_key")
+    needs_ep = force or not _poster_object_is_usable(store, ep_poster)
+    needs_title = force or not _poster_object_is_usable(store, title_poster)
+    if not needs_ep and not needs_title:
+        return {"skipped": True, "reason": "posters ok", "episode_id": episode_id}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        suffix = Path(str(video_key)).suffix or ".mp4"
+        local = Path(tmp) / f"video{suffix}"
+        store.get_file(str(video_key), local)
+        dur = float(ep.get("duration_s") or 0) or _probe_duration(local)
+        if dur and not ep.get("duration_s"):
+            conn.execute(
+                "UPDATE episodes SET duration_s = ? WHERE id = ?",
+                (float(dur), episode_id),
+            )
+        poster = Path(tmp) / "poster.jpg"
+        _extract_poster_frame(local, poster, duration_s=dur)
+        pkey = catalog_poster_key(slug, season, episode_n)
+        store.put_file(poster, pkey, content_type="image/jpeg")
+        conn.execute(
+            "UPDATE episodes SET poster_key = ? WHERE id = ?",
+            (pkey, episode_id),
+        )
+        tkey = catalog_title_poster_key(slug)
+        if needs_title or not title_poster:
+            store.put_file(poster, tkey, content_type="image/jpeg")
+            conn.execute(
+                "UPDATE titles SET poster_key = ? WHERE id = ?",
+                (tkey, title["id"]),
+            )
+        conn.commit()
+    return {
+        "skipped": False,
+        "episode_id": episode_id,
+        "poster_key": pkey,
+        "title_poster_key": tkey if (needs_title or not title_poster) else title_poster,
+    }
+
+
+def backfill_missing_posters(conn: Connection) -> dict[str, Any]:
+    """Idempotently fill missing or near-black posters for all episodes."""
+    store = get_object_store()
+    eps = fetchall_dicts(
+        conn,
+        "SELECT * FROM episodes WHERE video_key IS NOT NULL AND video_key != '' "
+        "ORDER BY created_at",
+    )
+    updated: list[str] = []
+    skipped = 0
+    failed: list[dict[str, str]] = []
+    for ep in eps:
+        title = get_title(conn, id=str(ep["title_id"]))
+        needs = (
+            not _poster_object_is_usable(store, ep.get("poster_key"))
+            or not title
+            or not _poster_object_is_usable(store, title.get("poster_key"))
+        )
+        if not needs:
+            skipped += 1
+            continue
+        try:
+            out = ensure_episode_poster(conn, str(ep["id"]))
+            if out.get("skipped"):
+                skipped += 1
+            else:
+                updated.append(str(ep["id"]))
+        except Exception as exc:
+            log.warning("poster backfill failed for %s: %s", ep.get("id"), exc)
+            failed.append({"episode_id": str(ep["id"]), "error": str(exc)})
+    return {
+        "updated": updated,
+        "updated_count": len(updated),
+        "skipped": skipped,
+        "failed": failed,
+    }
+
+
+def _ffprobe_json(path: Path) -> dict[str, Any]:
+    out = subprocess.check_output(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_format",
+            "-show_streams",
+            "-of",
+            "json",
+            str(path),
+        ],
+        text=True,
+    )
+    return json.loads(out)
+
+
+def _normalize_codec(name: str | None) -> str:
+    return (name or "").strip().lower().replace(" ", "")
+
+
+def probe_browser_safety(path: Path) -> dict[str, Any]:
+    """Classify a local media file for browser playback."""
+    data = _ffprobe_json(path)
+    fmt = str((data.get("format") or {}).get("format_name") or "").lower()
+    video_codec = None
+    audio_codec = None
+    for stream in data.get("streams") or []:
+        if stream.get("codec_type") == "video" and video_codec is None:
+            video_codec = _normalize_codec(stream.get("codec_name"))
+        elif stream.get("codec_type") == "audio" and audio_codec is None:
+            audio_codec = _normalize_codec(stream.get("codec_name"))
+    fmt_tokens = {t.strip() for t in fmt.split(",") if t.strip()}
+    in_mp4_like = bool(fmt_tokens & MP4_LIKE_FORMATS) or path.suffix.lower() in {
+        ".mp4",
+        ".m4v",
+    }
+    video_ok = video_codec in BROWSER_SAFE_VIDEO
+    audio_ok = audio_codec is None or audio_codec in BROWSER_SAFE_AUDIO
+    return {
+        "format": fmt,
+        "video_codec": video_codec,
+        "audio_codec": audio_codec,
+        "in_mp4_like": in_mp4_like,
+        "browser_safe_codecs": bool(video_ok and audio_ok),
+        "duration_s": float((data.get("format") or {}).get("duration") or 0) or 0.0,
+    }
+
+
+def mp4_has_faststart(path: Path) -> bool:
+    """True when an moov atom appears before mdat (web-friendly)."""
+    try:
+        with open(path, "rb") as f:
+            while True:
+                header = f.read(8)
+                if len(header) < 8:
+                    return False
+                size = int.from_bytes(header[:4], "big")
+                typ = header[4:8]
+                if size == 1:
+                    large = f.read(8)
+                    if len(large) < 8:
+                        return False
+                    size = int.from_bytes(large, "big")
+                    header_len = 16
+                elif size == 0:
+                    return typ == b"moov"
+                else:
+                    header_len = 8
+                if typ == b"moov":
+                    return True
+                if typ == b"mdat":
+                    return False
+                skip = max(0, size - header_len)
+                f.seek(skip, 1)
+    except OSError:
+        return False
+
+
+def prepare_browser_mp4(src: Path, dest: Path) -> str:
+    """Ensure dest is H.264/AAC (or silent) MP4 with +faststart.
+
+    Returns action: 'copy' | 'remux' | 'transcode'.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    info = probe_browser_safety(src)
+    if info["browser_safe_codecs"] and info["in_mp4_like"] and mp4_has_faststart(src):
+        shutil.copy2(src, dest)
+        return "copy"
+    if info["browser_safe_codecs"]:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(dest),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            if dest.is_file() and dest.stat().st_size > 0:
+                return "remux"
+        except subprocess.CalledProcessError:
+            dest.unlink(missing_ok=True)
+    # Transcode to browser-safe H.264 + AAC.
+    dest.unlink(missing_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(src),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-crf",
+        "20",
+        "-preset",
+        "veryfast",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(dest),
+    ]
+    # Some sources have no audio — drop -c:a if needed.
+    try:
+        subprocess.run(cmd, check=True, capture_output=True)
+    except subprocess.CalledProcessError:
+        dest.unlink(missing_ok=True)
+        cmd_no_audio = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(src),
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-crf",
+            "20",
+            "-preset",
+            "veryfast",
+            "-an",
+            "-movflags",
+            "+faststart",
+            str(dest),
+        ]
+        subprocess.run(cmd_no_audio, check=True, capture_output=True)
+    if not dest.is_file() or dest.stat().st_size == 0:
+        raise RuntimeError(f"ffmpeg failed to produce playable mp4 from {src}")
+    return "transcode"
+
+
+def _stream_store_to_file(store: ObjectStore, key: str, dest: Path) -> Path:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with store.open_stream(key) as src, open(dest, "wb") as out:
+        shutil.copyfileobj(src, out, length=1024 * 1024)
+    return dest
+
+
+def _copy_object(store: ObjectStore, src_key: str, dest_key: str) -> bool:
+    """Copy one object to another key via a temp file. Returns True if copied."""
+    if src_key == dest_key:
+        return False
+    if not store.exists(src_key):
+        return False
+    if store.exists(dest_key):
+        return False
+    with tempfile.TemporaryDirectory() as tmp:
+        local = Path(tmp) / "obj"
+        _stream_store_to_file(store, src_key, local)
+        store.put_file(local, dest_key)
+    return True
+
+
+def migrate_catalog_object_keys(conn: Connection | None = None) -> dict[str, Any]:
+    """Idempotently move video.mp4 / placements/ / moments/ to the new layout."""
+    from product_placement.catalog_keys import (
+        brand_slug,
+        legacy_moment_frame_key,
+        legacy_placement_clip_key,
+        legacy_placement_edited_key,
+        legacy_video_key,
+        moment_frame_key,
+        placement_clip_key,
+        placement_edited_key,
+        placement_frame_key,
+    )
+
+    own = conn is None
+    if own:
+        conn = get_connection()
+        init_schema(conn)
+    assert conn is not None
+    store = get_object_store()
+    moved: list[str] = []
+    skipped = 0
+
+    episodes = fetchall_dicts(conn, "SELECT * FROM episodes ORDER BY created_at")
+    for ep in episodes:
+        title = get_title(conn, id=str(ep["title_id"]))
+        if not title:
+            continue
+        slug = str(title.get("slug") or "title")
+        season = int(ep["season"])
+        episode_n = int(ep["episode_number"])
+        new_video = original_video_key(slug, season, episode_n)
+        cur_video = ep.get("video_key") or ""
+
+        # video.mp4 → original.mp4 (also accept missing DB key if legacy object exists)
+        legacy = legacy_video_key(slug, season, episode_n)
+        if cur_video.endswith("/video.mp4") or (
+            (not cur_video or cur_video == legacy) and store.exists(legacy)
+        ):
+            src = cur_video if store.exists(str(cur_video)) else legacy
+            if src != new_video:
+                if _copy_object(store, str(src), new_video) or store.exists(new_video):
+                    if store.exists(str(src)) and src != new_video:
+                        try:
+                            store.delete(str(src))
+                        except Exception:
+                            pass
+                    conn.execute(
+                        "UPDATE episodes SET video_key = ? WHERE id = ?",
+                        (new_video, ep["id"]),
+                    )
+                    moved.append(f"video:{ep['id']}")
+                else:
+                    skipped += 1
+            elif cur_video != new_video and store.exists(new_video):
+                conn.execute(
+                    "UPDATE episodes SET video_key = ? WHERE id = ?",
+                    (new_video, ep["id"]),
+                )
+                moved.append(f"video-db:{ep['id']}")
+            else:
+                skipped += 1
+        elif cur_video.endswith("/original.mp4"):
+            skipped += 1
+
+        # Moment frames: moments/<episode_id>/ → catalog/.../moments/
+        moments = fetchall_dicts(
+            conn,
+            "SELECT * FROM moments WHERE episode_id = ? ORDER BY start_s",
+            (ep["id"],),
+        )
+        for i, mom in enumerate(moments, start=1):
+            old_key = mom.get("frame_key")
+            new_key = moment_frame_key(slug, season, episode_n, i)
+            candidates = []
+            if old_key:
+                candidates.append(str(old_key))
+            candidates.append(legacy_moment_frame_key(str(ep["id"]), i))
+            src = next((c for c in candidates if store.exists(c)), None)
+            if not src:
+                continue
+            if src == new_key:
+                skipped += 1
+                continue
+            if _copy_object(store, src, new_key) or store.exists(new_key):
+                if src != new_key and store.exists(src):
+                    try:
+                        store.delete(src)
+                    except Exception:
+                        pass
+                conn.execute(
+                    "UPDATE moments SET frame_key = ? WHERE id = ?",
+                    (new_key, mom["id"]),
+                )
+                moved.append(f"moment:{mom['id']}")
+
+    placements = fetchall_dicts(conn, "SELECT * FROM placements ORDER BY created_at")
+    for pl in placements:
+        ep = get_episode(conn, id=str(pl.get("episode_id") or ""))
+        if not ep:
+            continue
+        title = get_title(conn, id=str(ep["title_id"]))
+        brand = get_brand(conn, id=str(pl["brand_id"]))
+        if not title or not brand:
+            continue
+        slug = str(title.get("slug") or "title")
+        bslug = brand_slug(str(brand.get("name") or ""), fallback=str(brand["id"]))
+        season = int(ep["season"])
+        episode_n = int(ep["episode_number"])
+        pid = str(pl["id"])
+        new_clip = placement_clip_key(slug, season, episode_n, bslug, pid)
+        old_clip = pl.get("clip_key") or legacy_placement_clip_key(pid)
+        if store.exists(str(old_clip)) and str(old_clip) != new_clip:
+            if _copy_object(store, str(old_clip), new_clip) or store.exists(new_clip):
+                try:
+                    store.delete(str(old_clip))
+                except Exception:
+                    pass
+                conn.execute(
+                    "UPDATE placements SET clip_key = ? WHERE id = ?",
+                    (new_clip, pid),
+                )
+                moved.append(f"clip:{pid}")
+        elif pl.get("clip_key") != new_clip and store.exists(new_clip):
+            conn.execute(
+                "UPDATE placements SET clip_key = ? WHERE id = ?",
+                (new_clip, pid),
+            )
+            moved.append(f"clip-db:{pid}")
+        else:
+            skipped += 1
+
+        # edited_frame.jpg → edited.jpg (DB doesn't store this key; move object only)
+        old_edited = legacy_placement_edited_key(pid)
+        new_edited = placement_edited_key(slug, season, episode_n, bslug, pid)
+        if store.exists(old_edited) and old_edited != new_edited:
+            if _copy_object(store, old_edited, new_edited) or store.exists(new_edited):
+                try:
+                    store.delete(old_edited)
+                except Exception:
+                    pass
+                moved.append(f"edited:{pid}")
+
+        # Optional legacy source frame if present under placements/
+        for legacy_frame in (
+            f"placements/{pid}/frame.jpg",
+            f"placements/{pid}/source_frame.jpg",
+        ):
+            new_frame = placement_frame_key(slug, season, episode_n, bslug, pid)
+            if store.exists(legacy_frame) and legacy_frame != new_frame:
+                if _copy_object(store, legacy_frame, new_frame) or store.exists(new_frame):
+                    try:
+                        store.delete(legacy_frame)
+                    except Exception:
+                        pass
+                    moved.append(f"frame:{pid}")
+
+    conn.commit()
+    if own:
+        conn.close()
+    seed_log("migrate_catalog_object_keys moved=%s skipped=%s", len(moved), skipped)
+    return {"moved": moved, "moved_count": len(moved), "skipped": skipped}
+
+
+def import_movies_from_store(
+    conn: Connection | None = None,
+    *,
+    prefix: str = MOVIES_PREFIX,
+) -> dict[str, Any]:
+    """Import movies/ uploads into catalog/<slug>/s01e01/original.mp4."""
+    own = conn is None
+    if own:
+        conn = get_connection()
+        init_schema(conn)
+    assert conn is not None
+
+    store = get_object_store()
+    keys = store.list_keys(prefix)
+    created: list[dict[str, Any]] = []
+    skipped_existing = 0
+    ignored = 0
+    failed: list[dict[str, str]] = []
+
+    for key in keys:
+        rel = key[len(prefix) :] if key.startswith(prefix) else key
+        if not rel or rel.endswith("/"):
+            continue
+        basename = Path(rel).name
+        ext = Path(basename).suffix.lower()
+        if ext not in MOVIE_VIDEO_EXTS:
+            ignored += 1
+            continue
+
+        display_name = humanize_movie_filename(basename)
+        slug = slugify(display_name)
+        dest_key = original_video_key(slug, 1, 1)
+
+        title = get_title(conn, slug=slug)
+        prior = None
+        if title:
+            prior = fetchone_dict(
+                conn,
+                "SELECT * FROM episodes WHERE title_id = ? AND season = 1 AND episode_number = 1",
+                (title["id"],),
+            )
+        # Already imported (catalog original or still pointing at this movies/ key).
+        if prior and prior.get("suggest_status") != "processing":
+            vkey = prior.get("video_key") or ""
+            if vkey in {dest_key, key} or store.exists(dest_key):
+                skipped_existing += 1
+                continue
+
+        seed_log("import movie key=%s slug=%s", key, slug)
+        try:
+            if not title:
+                title = create_title(
+                    conn,
+                    name=display_name,
+                    kind="movie",
+                    slug=slug,
+                    synopsis=f"Imported from {key}",
+                )
+            if prior and prior.get("suggest_status") == "processing":
+                ep = prior
+            else:
+                ep = create_episode(
+                    conn,
+                    title_id=title["id"],
+                    name=display_name,
+                    season=1,
+                    episode=1,
+                    video_key=None,
+                    suggest_status="processing",
+                )
+                # create_episode without video leaves video_key null — set source hint.
+                conn.execute(
+                    "UPDATE episodes SET video_key = ?, suggest_status = ? WHERE id = ?",
+                    (key, "processing", ep["id"]),
+                )
+                conn.commit()
+                ep = get_episode(conn, id=str(ep["id"])) or ep
+
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                src_local = tmp_path / f"source{ext}"
+                _stream_store_to_file(store, key, src_local)
+                playable = tmp_path / "original.mp4"
+                action = prepare_browser_mp4(src_local, playable)
+                seed_log("movie %s prepare action=%s", slug, action)
+                store.put_file(playable, dest_key, content_type="video/mp4")
+                dur = _probe_duration(playable)
+                conn.execute(
+                    "UPDATE episodes SET video_key = ?, duration_s = ?, suggest_status = ? "
+                    "WHERE id = ?",
+                    (dest_key, float(dur or 0.0), "queued", ep["id"]),
+                )
+                conn.commit()
+                try:
+                    ensure_episode_poster(conn, str(ep["id"]))
+                except Exception as exc:
+                    log.warning("poster failed for %s: %s", key, exc)
+                ep = get_episode(conn, id=str(ep["id"])) or ep
+
+            created.append(
+                {
+                    "title": get_title(conn, id=title["id"]),
+                    "episode": ep,
+                    "source_key": key,
+                    "video_key": dest_key,
+                    "name": display_name,
+                    "slug": slug,
+                }
+            )
+        except Exception as exc:
+            seed_log("skip movie import %s: %s", key, exc)
+            log.warning("skip movie import %s: %s", key, exc)
+            failed.append({"key": key, "error": str(exc)})
+            # Leave/mark processing row as failed so /watch stays clean.
+            if title:
+                bad = fetchone_dict(
+                    conn,
+                    "SELECT id FROM episodes WHERE title_id = ? AND season = 1 "
+                    "AND episode_number = 1 AND suggest_status = 'processing'",
+                    (title["id"],),
+                )
+                if bad:
+                    conn.execute(
+                        "UPDATE episodes SET suggest_status = ? WHERE id = ?",
+                        ("failed", bad["id"]),
+                    )
+                    conn.commit()
+
+    from product_placement.jobs import reset_stale_suggest_running
+
+    reclaimed = reset_stale_suggest_running(conn)
+    need_suggest = fetchall_dicts(
+        conn,
+        "SELECT * FROM episodes WHERE suggest_status IN ('queued', 'failed') "
+        "OR suggest_status IS NULL OR suggest_status = '' "
+        "ORDER BY created_at",
+    )
+    titles_out = list_titles(conn)
+    if own:
+        conn.close()
+    return {
+        "skipped": len(created) == 0,
+        "imported": len(created),
+        "episodes": [c["episode"] for c in created if c.get("episode")],
+        "items": created,
+        "suggest_queue": need_suggest,
+        "reclaimed_running": reclaimed,
+        "titles": titles_out,
+        "skipped_existing": skipped_existing,
+        "ignored_non_video": ignored,
+        "failed": failed,
+        "prefix": prefix,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -545,7 +1287,9 @@ def create_brand(
         if not p.is_file():
             continue
         asset_id = new_id()
-        key = f"brands/{bid}/{p.name}"
+        from product_placement.catalog_keys import brand_asset_key
+
+        key = brand_asset_key(bid, p.name)
         store.put_file(p, key)
         conn.execute(
             "INSERT INTO brand_assets (id, brand_id, filename, object_key, created_at) "
@@ -691,14 +1435,14 @@ def get_watch_payload(
 ) -> dict[str, Any]:
     title = get_title(conn, slug=title_slug)
     if not title:
-        raise ValueError(f"title not found: {title_slug}")
+        raise FileNotFoundError(f"title not found: {title_slug}")
     ep = fetchone_dict(
         conn,
         "SELECT * FROM episodes WHERE title_id = ? AND season = ? AND episode_number = ?",
         (title["id"], int(season), int(episode)),
     )
     if not ep:
-        raise ValueError(f"episode not found: s{season}e{episode}")
+        raise FileNotFoundError(f"episode not found: s{season}e{episode}")
 
     store = get_object_store()
     video_key = ep.get("video_key")
@@ -770,7 +1514,8 @@ BLENDER_SOURCES = [
         "name": "Big Buck Bunny",
         "kind": "movie",
         "synopsis": "Blender Foundation open movie (Peach) — short 320x180 sample.",
-        "url": "https://download.blender.org/peach/bigbuckbunny_movies/BigBuckBunny_320x180.mp4",
+        # Direct .mp4 was removed from blender.org; the peach tree now ships a zip.
+        "url": "https://download.blender.org/peach/bigbuckbunny_movies/BigBuckBunny_320x180.mp4.zip",
         "episodes": [
             {"name": "Big Buck Bunny", "season": 1, "episode": 1, "start": 0, "duration": 120},
         ],
@@ -788,21 +1533,65 @@ BLENDER_SOURCES = [
 ]
 
 
-def _download(url: str, dest: Path, *, timeout: float = 180.0) -> Path:
+def _extract_zip_media(archive: Path, dest_dir: Path) -> Path:
+    """Extract the first playable video from a zip next to the archive."""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive, "r") as zf:
+        names = [
+            n
+            for n in zf.namelist()
+            if not n.endswith("/") and Path(n).suffix.lower() in MOVIE_VIDEO_EXTS
+        ]
+        if not names:
+            raise RuntimeError(f"no video file inside zip: {archive}")
+        # Prefer smaller / named sample when multiple entries exist.
+        names.sort(key=lambda n: (0 if "320" in n or "480" in n else 1, len(n)))
+        member = names[0]
+        target = dest_dir / Path(member).name
+        with zf.open(member) as src, open(target, "wb") as out:
+            shutil.copyfileobj(src, out, length=1024 * 1024)
+        seed_log("extracted %s -> %s (%s bytes)", member, target.name, target.stat().st_size)
+        return target
+
+
+def _download(url: str, dest: Path, *, timeout: float = 600.0) -> Path:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    log.info("downloading %s -> %s", url, dest.name)
+    seed_log("downloading %s -> %s", url, dest.name)
+    dest.unlink(missing_ok=True)
     # Prefer curl for progress / resume friendliness when available.
     try:
         subprocess.run(
-            ["curl", "-L", "--fail", "--max-time", str(int(timeout)), "-o", str(dest), url],
+            [
+                "curl",
+                "-L",
+                "--fail",
+                "--max-time",
+                str(int(timeout)),
+                "-o",
+                str(dest),
+                url,
+            ],
             check=True,
             capture_output=True,
         )
-        if dest.is_file() and dest.stat().st_size > 0:
-            return dest
-    except (FileNotFoundError, subprocess.CalledProcessError) as exc:
-        log.debug("curl failed (%s), falling back to urllib", exc)
-    urllib.request.urlretrieve(url, str(dest))
+        if not dest.is_file() or dest.stat().st_size == 0:
+            raise RuntimeError(f"curl left empty file for {url}")
+    except (FileNotFoundError, subprocess.CalledProcessError, RuntimeError) as exc:
+        seed_log("curl failed (%s), falling back to urllib", exc)
+        dest.unlink(missing_ok=True)
+        try:
+            with urllib.request.urlopen(url, timeout=timeout) as resp, open(dest, "wb") as out:
+                shutil.copyfileobj(resp, out, length=1024 * 1024)
+        except urllib.error.HTTPError as http_exc:
+            dest.unlink(missing_ok=True)
+            raise RuntimeError(f"download failed HTTP {http_exc.code} for {url}") from http_exc
+        if not dest.is_file() or dest.stat().st_size == 0:
+            raise RuntimeError(f"download produced empty file for {url}")
+
+    # Zip wrappers (BBB peach sample): extract the media and return that path.
+    if dest.suffix.lower() == ".zip" or zipfile.is_zipfile(dest):
+        media = _extract_zip_media(dest, dest.parent)
+        return media
     return dest
 
 
@@ -862,7 +1651,8 @@ def seed_blender_open_movies(
     download_fn=_download,
     cache_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """Seed Blender open-movie titles/episodes when the catalog is empty."""
+    """Seed Blender open-movie titles/episodes. Idempotent; repairs orphan titles."""
+    _configure_catalog_logging()
     own = conn is None
     if own:
         conn = get_connection()
@@ -875,9 +1665,54 @@ def seed_blender_open_movies(
     cache.mkdir(parents=True, exist_ok=True)
     created: list[dict[str, Any]] = []
     skipped_existing = 0
+    seed_log("seed-blender start force=%s", force)
 
     for src in BLENDER_SOURCES:
         title = get_title(conn, slug=src["slug"])
+        missing_specs = []
+        for ep_spec in src["episodes"]:
+            prior = None
+            if title:
+                prior = fetchone_dict(
+                    conn,
+                    "SELECT id FROM episodes WHERE title_id = ? AND season = ? "
+                    "AND episode_number = ?",
+                    (title["id"], ep_spec["season"], ep_spec["episode"]),
+                )
+            if not prior:
+                missing_specs.append(ep_spec)
+        if not missing_specs and not force:
+            skipped_existing += len(src["episodes"])
+            seed_log("skip %s: episodes already present", src["slug"])
+            continue
+
+        url = src["url"]
+        url_name = Path(urlparse_path(url)).name or f"{src['slug']}.mp4"
+        download_dest = cache / url_name
+        # Cached unzipped media from a prior zip download.
+        media_hint = cache / f"{src['slug']}.mp4"
+        raw_path: Path | None = None
+        if not force:
+            for candidate in (media_hint, download_dest):
+                if candidate.is_file() and candidate.stat().st_size > 0:
+                    if candidate.suffix.lower() == ".zip" or zipfile.is_zipfile(candidate):
+                        try:
+                            raw_path = _extract_zip_media(candidate, cache)
+                            break
+                        except Exception:
+                            continue
+                    raw_path = candidate
+                    break
+
+        if raw_path is None or force or raw_path.stat().st_size == 0:
+            try:
+                raw_path = download_fn(url, download_dest)
+            except Exception as exc:
+                seed_log("skip %s: download failed: %s", src["slug"], exc)
+                # Do not create a title when media is unavailable (avoids orphans).
+                continue
+
+        # Only create the title after media is in hand.
         if not title:
             title = create_title(
                 conn,
@@ -887,34 +1722,9 @@ def seed_blender_open_movies(
                 attribution=ATTRIBUTION_BLENDER,
                 slug=src["slug"],
             )
-
-        url = src["url"]
-        ext = Path(urlparse_path(url)).suffix or ".mp4"
-        raw_path = cache / f"{src['slug']}{ext}"
-        # Only download if any episode for this source is still missing.
-        missing_eps = False
-        for ep_spec in src["episodes"]:
-            prior = fetchone_dict(
-                conn,
-                "SELECT id FROM episodes WHERE title_id = ? AND season = ? AND episode_number = ?",
-                (title["id"], ep_spec["season"], ep_spec["episode"]),
-            )
-            if not prior:
-                missing_eps = True
-                break
-        if not missing_eps and not force:
-            skipped_existing += len(src["episodes"])
-            continue
-
-        if force or not raw_path.is_file() or raw_path.stat().st_size == 0:
-            try:
-                download_fn(url, raw_path)
-            except Exception as exc:
-                log.warning("skip %s: download failed: %s", src["slug"], exc)
-                continue
+            seed_log("created title %s", src["slug"])
 
         for ep_spec in src["episodes"]:
-            # Skip if episode already exists for this title/season/ep.
             prior = fetchone_dict(
                 conn,
                 "SELECT id FROM episodes WHERE title_id = ? AND season = ? AND episode_number = ?",
@@ -935,25 +1745,37 @@ def seed_blender_open_movies(
                 else:
                     shutil.copy2(raw_path, clip)
             except Exception as exc:
-                log.warning("trim failed for %s, using full file: %s", src["slug"], exc)
+                seed_log("trim failed for %s, using full file: %s", src["slug"], exc)
                 clip = raw_path
 
-            ep = create_episode(
-                conn,
-                title_id=title["id"],
-                name=ep_spec["name"],
-                season=ep_spec["season"],
-                episode=ep_spec["episode"],
-                video_path=clip,
-                suggest_status="queued",
-            )
+            try:
+                ep = create_episode(
+                    conn,
+                    title_id=title["id"],
+                    name=ep_spec["name"],
+                    season=ep_spec["season"],
+                    episode=ep_spec["episode"],
+                    video_path=clip,
+                    suggest_status="queued",
+                )
+            except Exception as exc:
+                seed_log("create_episode failed for %s s%se%s: %s", src["slug"], ep_spec["season"], ep_spec["episode"], exc)
+                continue
             created.append(ep)
-            # create_episode already writes catalog/<slug>/poster.jpg when the
-            # title has none. Refresh so a later episode does not see a stale row.
+            seed_log(
+                "created episode %s s%02de%02d key=%s",
+                src["slug"],
+                ep_spec["season"],
+                ep_spec["episode"],
+                ep.get("video_key"),
+            )
             title = get_title(conn, id=title["id"]) or title
 
+    # Fill missing / near-black posters (e.g. BBB missing title poster, ToS dark).
+    poster_backfill = backfill_missing_posters(conn)
+    seed_log("poster backfill updated=%s", poster_backfill.get("updated_count"))
+
     titles_out = list_titles(conn)
-    # Crash recovery + queue: reclaim abandoned 'running', then list claimable rows.
     from product_placement.jobs import reset_stale_suggest_running
 
     reclaimed = reset_stale_suggest_running(conn)
@@ -965,17 +1787,21 @@ def seed_blender_open_movies(
     )
     if own:
         conn.close()
+    seed_log(
+        "seed-blender done created=%s skipped_existing=%s",
+        len(created),
+        skipped_existing,
+    )
     return {
-        # True only when nothing new was added.
         "skipped": len(created) == 0,
         "reason": "all episodes already present" if not created else None,
         "episodes_created": len(created),
-        # Newly created first; callers also get the full suggest queue.
         "episodes": created or need_suggest,
         "suggest_queue": need_suggest,
         "reclaimed_running": reclaimed,
         "titles": titles_out,
         "skipped_existing": skipped_existing,
+        "poster_backfill": poster_backfill,
     }
 
 
@@ -1010,7 +1836,12 @@ def build_parser() -> argparse.ArgumentParser:
         return sub.add_parser(name, parents=[json_parent])
 
     add("init-db")
-    add("list-titles")
+    lt = add("list-titles")
+    lt.add_argument(
+        "--watchable",
+        action="store_true",
+        help="Only titles with at least one non-processing episode",
+    )
 
     gt = add("get-title")
     gt.add_argument("--id", default=None)
@@ -1048,7 +1879,7 @@ def build_parser() -> argparse.ArgumentParser:
     rp.add_argument(
         "--video-key",
         default=None,
-        help="Existing object key. Defaults to catalog/<slug>/sXXeYY/video.mp4",
+        help="Existing object key. Defaults to catalog/<slug>/sXXeYY/original.mp4",
     )
 
     lm = add("list-moments")
@@ -1084,11 +1915,15 @@ def build_parser() -> argparse.ArgumentParser:
     wp.add_argument("--brand-id", default=None)
 
     add("seed-blender")
+    add("import-movies")
+    add("backfill-posters")
+    add("migrate-catalog-keys")
 
     return p
 
 
 def main(argv: list[str] | None = None) -> None:
+    _configure_catalog_logging()
     args = build_parser().parse_args(argv)
     conn = get_connection()
     try:
@@ -1099,7 +1934,7 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         if args.command == "list-titles":
-            _print_json(list_titles(conn))
+            _print_json(list_titles(conn, watchable_only=bool(args.watchable)))
             return
 
         if args.command == "get-title":
@@ -1216,19 +2051,34 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         if args.command == "get-watch-payload":
-            _print_json(
-                get_watch_payload(
-                    conn,
-                    title_slug=args.title_slug,
-                    season=args.season,
-                    episode=args.episode,
-                    brand_id=args.brand_id,
+            try:
+                _print_json(
+                    get_watch_payload(
+                        conn,
+                        title_slug=args.title_slug,
+                        season=args.season,
+                        episode=args.episode,
+                        brand_id=args.brand_id,
+                    )
                 )
-            )
+            except FileNotFoundError as exc:
+                raise SystemExit(json.dumps({"error": str(exc)})) from exc
             return
 
         if args.command == "seed-blender":
             _print_json(seed_blender_open_movies(conn))
+            return
+
+        if args.command == "import-movies":
+            _print_json(import_movies_from_store(conn))
+            return
+
+        if args.command == "backfill-posters":
+            _print_json(backfill_missing_posters(conn))
+            return
+
+        if args.command == "migrate-catalog-keys":
+            _print_json(migrate_catalog_object_keys(conn))
             return
 
         raise SystemExit(f"unknown command {args.command}")

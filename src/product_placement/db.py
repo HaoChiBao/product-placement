@@ -254,7 +254,9 @@ def migrate_file_brands(conn: Connection) -> list[str]:
             if not local.is_file():
                 continue
             asset_id = uuid.uuid4().hex[:12]
-            key = f"brands/{brand_id}/{filename}"
+            from product_placement.catalog_keys import brand_asset_key
+
+            key = brand_asset_key(brand_id, str(filename))
             content_type = _guess_content_type(local)
             store.put_file(local, key, content_type=content_type)
             conn.execute(

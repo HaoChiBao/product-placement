@@ -364,9 +364,17 @@ def run_episode_suggest_job(episode_id: str, *, n: int = 5) -> dict[str, Any]:
             conn.execute("DELETE FROM moments WHERE episode_id = ?", (episode_id,))
             conn.commit()
 
+            from product_placement.catalog import get_title
+            from product_placement.catalog_keys import moment_frame_key
+
+            title = get_title(conn, id=str(ep["title_id"]))
+            slug = str((title or {}).get("slug") or "title")
+            season = int(ep.get("season") or 1)
+            episode_n = int(ep.get("episode_number") or 1)
+
             stored: list[dict[str, Any]] = []
             for i, m in enumerate(moments):
-                frame_key = f"moments/{episode_id}/moment_{i + 1:02d}.jpg"
+                frame_key = moment_frame_key(slug, season, episode_n, i + 1)
                 if m.frame_path.is_file():
                     store.put_file(m.frame_path, frame_key, content_type="image/jpeg")
                 row = insert_moment(
@@ -530,14 +538,36 @@ def run_placement_swap_job(
             if not result_path.is_file():
                 raise RuntimeError("frame swap completed but result clip missing")
 
-            clip_key = f"placements/{placement_id}/clip.mp4"
+            from product_placement.catalog import get_title
+            from product_placement.catalog_keys import (
+                brand_slug,
+                placement_clip_key,
+                placement_edited_key,
+                placement_frame_key,
+            )
+
+            title = get_title(conn, id=str(ep["title_id"]))
+            slug = str((title or {}).get("slug") or "title")
+            season = int(ep.get("season") or 1)
+            episode_n = int(ep.get("episode_number") or 1)
+            bslug = brand_slug(
+                str(brand_row.get("name") or ""), fallback=str(brand_row["id"])
+            )
+            clip_key = placement_clip_key(slug, season, episode_n, bslug, placement_id)
             store.put_file(result_path, clip_key, content_type="video/mp4")
-            # Persist the edited still for debugging / brand review.
+            # Persist source + edited stills beside the clip.
+            source_frame = Path(meta.get("frame_path") or "")
+            if source_frame.is_file():
+                store.put_file(
+                    source_frame,
+                    placement_frame_key(slug, season, episode_n, bslug, placement_id),
+                    content_type="image/jpeg",
+                )
             edited = Path(meta.get("edited_frame_path") or "")
             if edited.is_file():
                 store.put_file(
                     edited,
-                    f"placements/{placement_id}/edited_frame.jpg",
+                    placement_edited_key(slug, season, episode_n, bslug, placement_id),
                     content_type="image/jpeg",
                 )
             backend = meta.get("backend") or ("mock" if test_mode else "seedance-i2v")
