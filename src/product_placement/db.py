@@ -210,6 +210,8 @@ CREATE TABLE IF NOT EXISTS placements (
     cost_usd REAL,
     clip_start_s REAL,
     clip_end_s REAL,
+    version_label TEXT,
+    slot_key TEXT,
     created_at TEXT,
     updated_at TEXT
 );
@@ -243,6 +245,8 @@ def init_schema(conn: Connection) -> None:
     _ensure_column(conn, "placements", "cost_usd", "REAL")
     _ensure_column(conn, "placements", "clip_start_s", "REAL")
     _ensure_column(conn, "placements", "clip_end_s", "REAL")
+    _ensure_column(conn, "placements", "version_label", "TEXT")
+    _ensure_column(conn, "placements", "slot_key", "TEXT")
     # NULL = the brand-agnostic scan; otherwise moments found for that brand.
     _ensure_column(conn, "moments", "brand_id", "TEXT")
     _backfill_title_source(conn)

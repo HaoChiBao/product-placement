@@ -184,6 +184,150 @@ def test_placement_import_reuses_brand_and_keeps_other_starts(catalog_env):
     assert len(fetchall_dicts(conn, "SELECT id FROM placements")) == 2
 
 
+def test_versioned_placements_share_a_window(catalog_env):
+    conn = catalog_env
+    _title, ep = _episode(conn)
+    start = 107.87
+    end = 113.87
+    daisy = dict(
+        episode_id=ep["id"],
+        start_s=start,
+        end_s=end,
+        brand="Daisy",
+        object="sour cream tub",
+        slot_key="fridge-tub",
+    )
+
+    def daisy_item(**overrides):
+        item = dict(daisy)
+        item.update(overrides)
+        return _placement(**item)
+
+    first = import_finished_placements(
+        conn,
+        [
+            daisy_item(video_s3_key="swaps/home-alone/ha-2.mp4", version_label="Daisy v1"),
+            daisy_item(
+                video_s3_key="swaps/home-alone/ha-2b.mp4",
+                cost_usd=0.32,
+                version_label="Daisy v2",
+            ),
+            _placement(
+                episode_id=ep["id"],
+                start_s=start,
+                end_s=end,
+                brand="Swiss Miss",
+                object="cocoa tin",
+                video_s3_key="swaps/home-alone/ha-3.mp4",
+                cost_usd=0.33,
+                version_label="Swiss Miss",
+                slot_key="fridge-tub",
+            ),
+        ],
+    )
+    assert [row["action"] for row in first["placements"]] == ["created", "created", "created"]
+    assert len({row["id"] for row in first["placements"]}) == 3
+
+    updated = import_finished_placements(
+        conn,
+        [
+            daisy_item(
+                start_s=start + 0.0004,
+                video_s3_key="swaps/home-alone/ha-2-new.mp4",
+                cost_usd=0.4,
+                version_label="  Daisy v1  ",
+                slot_key="other-slot",
+            )
+        ],
+    )
+    assert updated["placements"][0]["action"] == "updated"
+    assert updated["placements"][0]["id"] == first["placements"][0]["id"]
+    assert updated["placements"][0]["version_label"] == "Daisy v1"
+    assert updated["placements"][0]["slot_key"] == "other-slot"
+    assert updated["placements"][0]["clip_key"] == "swaps/home-alone/ha-2-new.mp4"
+
+    rows = fetchall_dicts(
+        conn,
+        "SELECT version_label, clip_key FROM placements WHERE episode_id = ? ORDER BY created_at, id",
+        (ep["id"],),
+    )
+    assert [row["version_label"] for row in rows] == ["Daisy v1", "Daisy v2", "Swiss Miss"]
+    assert rows[1]["clip_key"] == "swaps/home-alone/ha-2b.mp4"
+    assert rows[2]["clip_key"] == "swaps/home-alone/ha-3.mp4"
+
+    bare = import_finished_placements(
+        conn,
+        [
+            daisy_item(
+                video_s3_key="swaps/home-alone/ha-2-bare.mp4",
+                cost_usd=0.2,
+                version_label="  ",
+                slot_key="",
+            )
+        ],
+    )
+    assert bare["placements"][0]["action"] == "created"
+    assert bare["placements"][0]["version_label"] is None
+    assert bare["placements"][0]["slot_key"] is None
+    again = import_finished_placements(
+        conn,
+        [
+            daisy_item(
+                video_s3_key="swaps/home-alone/ha-2-bare-2.mp4",
+                cost_usd=0.21,
+                slot_key=" ",
+            )
+        ]
+    )
+    assert again["placements"][0]["action"] == "updated"
+    assert again["placements"][0]["id"] == bare["placements"][0]["id"]
+
+    apart = import_finished_placements(
+        conn,
+        [
+            daisy_item(
+                start_s=start + 0.002,
+                video_s3_key="swaps/home-alone/ha-2-later.mp4",
+                version_label="Daisy v1",
+            )
+        ],
+    )
+    assert apart["placements"][0]["action"] == "created"
+    assert apart["placements"][0]["id"] != first["placements"][0]["id"]
+
+    payload = get_watch_payload(conn, title_slug="home-alone", season=1, episode=1)
+    exact = [p for p in payload["placements"] if abs(p["start_s"] - start) < 1e-6]
+    shifted = [p for p in payload["placements"] if abs(p["start_s"] - (start + 0.0004)) < 1e-6]
+    assert [p["version_label"] for p in exact] == ["Daisy v2", "Swiss Miss", None]
+    assert [p["slot_key"] for p in exact] == ["fridge-tub", "fridge-tub", None]
+    assert exact[2]["clip_url"].endswith("swaps/home-alone/ha-2-bare-2.mp4")
+    assert shifted[0]["version_label"] == "Daisy v1"
+    assert shifted[0]["slot_key"] == "other-slot"
+    assert shifted[0]["brand_id"]
+    assert shifted[0]["clip_url"].endswith("swaps/home-alone/ha-2-new.mp4")
+    forced = get_watch_payload(
+        conn,
+        title_slug="home-alone",
+        season=1,
+        episode=1,
+        brand_id=shifted[0]["brand_id"],
+    )
+    assert {p["brand_name"] for p in forced["placements"]} == {"Daisy"}
+
+
+def test_legacy_placement_table_gains_version_columns(catalog_env):
+    conn = catalog_env
+    conn.execute("ALTER TABLE placements DROP COLUMN version_label")
+    conn.execute("ALTER TABLE placements DROP COLUMN slot_key")
+    conn.commit()
+    init_schema(conn)
+    cur = conn.cursor()
+    cur.execute("PRAGMA table_info(placements)")
+    cols = {row[1] for row in cur.fetchall()}
+    assert "version_label" in cols
+    assert "slot_key" in cols
+
+
 def test_placement_import_rejects_unknown_episode(catalog_env):
     conn = catalog_env
     with pytest.raises(ValueError, match="episode not found"):
