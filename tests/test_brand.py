@@ -40,6 +40,25 @@ def test_parse_brief_splits_prefer_and_avoid():
     assert rules.placement in {"resting", "foreground", "background", "held"}
 
 
+def test_parse_brief_comma_separates_prefer_avoid():
+    rules = parse_brief("Prefer cups, avoid beds")
+    assert "cup" in mapped_coco_labels(rules.prefer)
+    assert "bed" in mapped_coco_labels(rules.avoid)
+    assert "cup" not in mapped_coco_labels(rules.avoid)
+
+
+def test_parse_brief_ignore_placement_words_in_avoid():
+    rules = parse_brief(
+        "Prefer cups resting on a dining table. Avoid beds, laptops, and close-up faces."
+    )
+    assert rules.placement == "resting"
+    rules2 = parse_brief(
+        "Place the product held in hand in the foreground. Prefer cups. "
+        "Avoid dining tables and background shelves."
+    )
+    assert rules2.placement in {"held", "foreground"}
+
+
 def test_mapped_coco_labels():
     assert "cup" in mapped_coco_labels(["coffee mug on a table"])
     assert "dining table" in mapped_coco_labels(["kitchen counter"])

@@ -80,10 +80,14 @@ class ClipOnnx:
         std = np.array([0.26862954, 0.26130258, 0.27577711], dtype=np.float32)
         x = (x - mean) / std
         x = np.transpose(x, (2, 0, 1))[None, ...]
-        # Xenova vision_model: input_name typically pixel_values
         inp = vision.get_inputs()[0].name
-        out = vision.run(None, {inp: x})[0]
-        # pool: CLS token or already pooled
+        names = [o.name for o in vision.get_outputs()]
+        raw = vision.run(None, {inp: x})
+        # Prefer projected image_embeds (512-d) over encoder hidden states.
+        if "image_embeds" in names:
+            out = raw[names.index("image_embeds")]
+        else:
+            out = raw[0]
         if out.ndim == 3:
             vec = out[:, 0, :]
         else:
@@ -97,13 +101,16 @@ class ClipOnnx:
         inp_name = text_sess.get_inputs()[0].name
         arr = np.array([ids], dtype=np.int64)
         feeds = {inp_name: arr}
-        # Some exports also want attention_mask
         if len(text_sess.get_inputs()) > 1:
             mask_name = text_sess.get_inputs()[1].name
             feeds[mask_name] = (arr != 0).astype(np.int64)
-        out = text_sess.run(None, feeds)[0]
+        names = [o.name for o in text_sess.get_outputs()]
+        raw = text_sess.run(None, feeds)
+        if "text_embeds" in names:
+            out = raw[names.index("text_embeds")]
+        else:
+            out = raw[0]
         if out.ndim == 3:
-            # EOS pooling: last non-pad token
             length = int(np.sum(arr[0] != 0))
             vec = out[0, max(0, length - 1), :]
         else:
@@ -120,9 +127,14 @@ class ClipOnnx:
             scores = []
             for t in texts:
                 txt = self.encode_text(t)
+                if img.shape != txt.shape:
+                    raise ValueError(
+                        f"CLIP dim mismatch vision={img.shape} text={txt.shape}"
+                    )
                 scores.append(float(np.dot(img, txt)))
             return scores
         except Exception:
+            self._available = False
             return [0.0] * len(texts)
 
 

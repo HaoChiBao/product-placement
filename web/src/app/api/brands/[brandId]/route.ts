@@ -3,6 +3,7 @@ import path from "path"
 import { NextRequest, NextResponse } from "next/server"
 import { spawnSync } from "child_process"
 
+import { isSafeBrandId } from "@/lib/brand-id"
 import { dataRoot, pythonBin, pythonEnv, repoRoot } from "@/lib/runs"
 
 export const runtime = "nodejs"
@@ -11,11 +12,20 @@ function brandMeta(brandId: string): string {
   return path.join(dataRoot(), "brands", brandId, "brand.json")
 }
 
+function rejectUnsafeId(brandId: string): NextResponse | null {
+  if (!isSafeBrandId(brandId)) {
+    return NextResponse.json({ error: "invalid brand id" }, { status: 400 })
+  }
+  return null
+}
+
 export async function GET(
   _req: NextRequest,
   ctx: { params: Promise<{ brandId: string }> }
 ) {
   const { brandId } = await ctx.params
+  const bad = rejectUnsafeId(brandId)
+  if (bad) return bad
   const meta = brandMeta(brandId)
   if (!fs.existsSync(meta)) {
     return NextResponse.json({ error: "brand not found" }, { status: 404 })
@@ -32,6 +42,8 @@ export async function PATCH(
   ctx: { params: Promise<{ brandId: string }> }
 ) {
   const { brandId } = await ctx.params
+  const bad = rejectUnsafeId(brandId)
+  if (bad) return bad
   const meta = brandMeta(brandId)
   if (!fs.existsSync(meta)) {
     return NextResponse.json({ error: "brand not found" }, { status: 404 })
@@ -72,7 +84,13 @@ export async function DELETE(
   ctx: { params: Promise<{ brandId: string }> }
 ) {
   const { brandId } = await ctx.params
-  const dir = path.join(dataRoot(), "brands", brandId)
+  const bad = rejectUnsafeId(brandId)
+  if (bad) return bad
+  const root = path.resolve(dataRoot(), "brands")
+  const dir = path.resolve(root, brandId)
+  if (!dir.startsWith(root + path.sep)) {
+    return NextResponse.json({ error: "invalid brand id" }, { status: 400 })
+  }
   if (!fs.existsSync(dir)) {
     return NextResponse.json({ error: "brand not found" }, { status: 404 })
   }

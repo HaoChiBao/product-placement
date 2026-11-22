@@ -62,15 +62,25 @@ export async function POST(req: NextRequest) {
 
     let productPath = ""
     if (brandId) {
+      const { isSafeBrandId, safeAssetName } = await import("@/lib/brand-id")
       const { dataRoot } = await import("@/lib/runs")
-      const brandMeta = path.join(dataRoot(), "brands", brandId, "brand.json")
-      if (fs.existsSync(brandMeta)) {
-        const brand = JSON.parse(fs.readFileSync(brandMeta, "utf8")) as {
-          assets?: string[]
-        }
-        const asset = (brand.assets || [])[0]
-        if (asset) {
-          productPath = path.join(dataRoot(), "brands", brandId, asset)
+      if (isSafeBrandId(brandId)) {
+        const brandRoot = path.resolve(dataRoot(), "brands", brandId)
+        const brandMeta = path.join(brandRoot, "brand.json")
+        if (fs.existsSync(brandMeta)) {
+          const brand = JSON.parse(fs.readFileSync(brandMeta, "utf8")) as {
+            assets?: string[]
+          }
+          const asset = safeAssetName((brand.assets || [])[0] || "")
+          if (asset) {
+            const candidate = path.resolve(brandRoot, asset)
+            if (
+              candidate.startsWith(brandRoot + path.sep) &&
+              fs.existsSync(candidate)
+            ) {
+              productPath = candidate
+            }
+          }
         }
       }
     }

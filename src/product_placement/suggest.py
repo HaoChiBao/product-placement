@@ -206,11 +206,12 @@ def _score_window(
     if brand is not None:
         from product_placement.brand_score import reshape_region_to_product, score_brand_window
 
+        # Prefer product-aspect sizing; keep the original face-free box if reshape
+        # cannot grow (missing asset AR, or expanded box hits a face). Never drop a
+        # valid prop solely for being under min_area — that is a soft preference.
         region = reshape_region_to_product(
             region, w, h, face_boxes, product_ar, min_area_frac=min_area
         )
-        if region.area < min_area * w * h:
-            return None, None
         fit = score_brand_window(
             frame_bgr=frame,
             region=region,

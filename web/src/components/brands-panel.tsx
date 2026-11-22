@@ -32,7 +32,18 @@ export function BrandsPanel({
   const [brief, setBrief] = useState(EXAMPLE_BRIEFS[0])
   const [rules, setRules] = useState<BrandRules | null>(null)
   const [assets, setAssets] = useState<File[]>([])
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    if (!assets[0]) {
+      setPreviewUrl(null)
+      return
+    }
+    const url = URL.createObjectURL(assets[0])
+    setPreviewUrl(url)
+    return () => URL.revokeObjectURL(url)
+  }, [assets])
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -161,9 +172,9 @@ export function BrandsPanel({
               successLabel={assets.length ? `${assets.length} image(s)` : "Ready"}
               className="min-h-[160px]"
             />
-            {assets[0] && (
+            {previewUrl && (
               <img
-                src={URL.createObjectURL(assets[0])}
+                src={previewUrl}
                 alt="Product preview"
                 className="h-24 w-24 rounded-xl object-contain bg-neutral-100"
               />

@@ -2,6 +2,7 @@ import fs from "fs"
 import path from "path"
 import { NextRequest, NextResponse } from "next/server"
 
+import { isSafeBrandId, safeAssetName } from "@/lib/brand-id"
 import { dataRoot } from "@/lib/runs"
 
 export const runtime = "nodejs"
@@ -11,8 +12,18 @@ export async function GET(
   ctx: { params: Promise<{ brandId: string; name: string }> }
 ) {
   const { brandId, name } = await ctx.params
-  const safe = path.basename(name)
-  const filePath = path.join(dataRoot(), "brands", brandId, safe)
+  if (!isSafeBrandId(brandId)) {
+    return NextResponse.json({ error: "invalid brand id" }, { status: 400 })
+  }
+  const safe = safeAssetName(name)
+  if (!safe) {
+    return NextResponse.json({ error: "invalid asset name" }, { status: 400 })
+  }
+  const brandRoot = path.resolve(dataRoot(), "brands", brandId)
+  const filePath = path.resolve(brandRoot, safe)
+  if (!filePath.startsWith(brandRoot + path.sep)) {
+    return NextResponse.json({ error: "invalid asset name" }, { status: 400 })
+  }
   if (!fs.existsSync(filePath)) {
     return NextResponse.json({ error: "not found" }, { status: 404 })
   }

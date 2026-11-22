@@ -128,8 +128,25 @@ def new_brand_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+_AVOID_RE = re.compile(
+    r"\b(avoid|never|don't|do not|no|without|not on|keep off)\b", re.I
+)
+_PREFER_RE = re.compile(
+    r"\b(prefer|want|like|place|put|on a|on the|in a|in the|held|resting)\b", re.I
+)
+
+
 def _split_phrases(brief: str) -> list[str]:
-    parts = re.split(r"[.\n;|/]+", brief or "")
+    """Split on sentence breaks and on commas that introduce a new prefer/avoid clause."""
+    text = brief or ""
+    # Prefer cups, avoid beds → two phrases
+    text = re.sub(
+        r",\s*(?=(?:avoid|never|don't|do not|no|prefer|want|like|place)\b)",
+        ". ",
+        text,
+        flags=re.I,
+    )
+    parts = re.split(r"[.\n;|/]+", text)
     return [p.strip() for p in parts if p.strip()]
 
 
@@ -139,16 +156,11 @@ def parse_brief(brief: str) -> BrandRules:
     avoid: list[str] = []
     placement = "resting"
     min_area = 0.02
-    avoid_re = re.compile(
-        r"\b(avoid|never|don't|do not|no|without|not on|keep off)\b", re.I
-    )
-    prefer_re = re.compile(
-        r"\b(prefer|want|like|place|put|on a|on the|in a|in the|held|resting)\b", re.I
-    )
 
     for phrase in _split_phrases(brief):
         low = phrase.lower()
-        bucket = avoid if avoid_re.search(low) else prefer if prefer_re.search(low) else prefer
+        is_avoid = bool(_AVOID_RE.search(low))
+        bucket = avoid if is_avoid else prefer
         # Strip leading directive words for cleaner chips.
         cleaned = re.sub(
             r"^(avoid|never|don't|do not|no|prefer|want|like|please)\s+",
@@ -158,13 +170,12 @@ def parse_brief(brief: str) -> BrandRules:
         ).strip(" ,.-")
         if not cleaned:
             continue
-        if bucket is avoid:
-            if cleaned.lower() not in {a.lower() for a in avoid}:
-                avoid.append(cleaned)
-        else:
-            if cleaned.lower() not in {p.lower() for p in prefer}:
-                prefer.append(cleaned)
+        if cleaned.lower() not in {x.lower() for x in bucket}:
+            bucket.append(cleaned)
 
+        # Placement / size only from prefer (or neutral) phrases — not avoid text.
+        if is_avoid:
+            continue
         if re.search(r"\bheld\b|\bin hand\b|\bhand[-\s]?held\b", low):
             placement = "held"
         elif re.search(r"\bresting\b|\bon (a |the )?(table|counter|desk|surface)\b", low):
@@ -182,7 +193,7 @@ def parse_brief(brief: str) -> BrandRules:
     # so "table … Avoid beds" does not pull dining table into avoid.
     for phrase in _split_phrases(brief):
         low = phrase.lower()
-        bucket = avoid if avoid_re.search(low) else prefer
+        bucket = avoid if _AVOID_RE.search(low) else prefer
         for alias, label in sorted(_CLASS_ALIASES.items(), key=lambda kv: -len(kv[0])):
             if alias not in low:
                 continue
