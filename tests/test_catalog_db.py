@@ -106,7 +106,7 @@ def test_create_title_episode_moment_brand_placement(catalog_env, tmp_path):
     )
     assert title["slug"] == "demo-film"
     assert title["source"] == "test"
-    assert list_titles(conn)
+    assert list_titles(conn, source="all")
 
     # Tiny fake video via ffmpeg color source
     video = tmp_path / "clip.mp4"
@@ -473,7 +473,7 @@ def test_seed_blender_mocked(catalog_env, tmp_path, monkeypatch):
     )
     assert result["skipped"] is False
     assert result["episodes_created"] >= 1
-    titles = list_titles(conn)
+    titles = list_titles(conn, source="all")
     bunny = next(t for t in titles if t["slug"] == "big-buck-bunny")
     assert bunny["poster_key"] == "catalog/big-buck-bunny/poster.jpg"
     assert bunny["source"] == "test"
@@ -483,6 +483,7 @@ def test_seed_blender_mocked(catalog_env, tmp_path, monkeypatch):
         (t.get("attribution") or "").startswith("CC-BY") for t in titles if t["slug"]
     )
     assert all(t.get("source") == "test" for t in titles)
+    assert list_titles(conn) == []
 
     # Second call without force creates nothing new (but does not hard-bail early).
     again = seed_blender_open_movies(conn, force=False, download_fn=fake_download)
@@ -573,10 +574,12 @@ def test_list_titles_filters_by_source(catalog_env, tmp_path, monkeypatch):
         "blender-demo",
         "home-alone-2",
     }
-    monkeypatch.setenv("VIDEO_SOURCE", "hosted")
-    assert [t["slug"] for t in list_titles(conn)] == ["home-alone-2"]
     monkeypatch.delenv("VIDEO_SOURCE", raising=False)
+    assert [t["slug"] for t in list_titles(conn)] == ["home-alone-2"]
+    monkeypatch.setenv("VIDEO_SOURCE", "all")
     assert {t["slug"] for t in list_titles(conn)} == {"blender-demo", "home-alone-2"}
+    monkeypatch.setenv("VIDEO_SOURCE", "test")
+    assert [t["slug"] for t in list_titles(conn)] == ["blender-demo"]
 
 
 def test_title_source_backfill_from_synopsis(catalog_env):
@@ -738,7 +741,7 @@ def test_watchable_titles_hide_orphans_and_processing(catalog_env, tmp_path):
     conn, data = catalog_env
     orphan = create_title(conn, name="Orphan", kind="movie", slug="orphan")
     assert orphan
-    assert list_titles(conn, watchable_only=True) == []
+    assert list_titles(conn, watchable_only=True, source="all") == []
 
     title = create_title(conn, name="Ready Film", kind="movie", slug="ready-film")
     video = tmp_path / "r.mp4"
@@ -752,7 +755,7 @@ def test_watchable_titles_hide_orphans_and_processing(catalog_env, tmp_path):
         video_path=video,
         suggest_status="queued",
     )
-    watchable = list_titles(conn, watchable_only=True)
+    watchable = list_titles(conn, watchable_only=True, source="all")
     assert [t["slug"] for t in watchable] == ["ready-film"]
 
     processing = create_title(conn, name="Processing", kind="movie", slug="processing")
@@ -763,7 +766,7 @@ def test_watchable_titles_hide_orphans_and_processing(catalog_env, tmp_path):
         ("epproc01", processing["id"], "Processing", "movies/x.mp4", "2020-01-01T00:00:00Z"),
     )
     conn.commit()
-    watchable = list_titles(conn, watchable_only=True)
+    watchable = list_titles(conn, watchable_only=True, source="all")
     assert [t["slug"] for t in watchable] == ["ready-film"]
 
     failed = create_title(conn, name="Failed Film", kind="movie", slug="failed-film")
@@ -774,7 +777,7 @@ def test_watchable_titles_hide_orphans_and_processing(catalog_env, tmp_path):
         ("epfail01", failed["id"], "Failed Film", "movies/bad.mkv", "2020-01-01T00:00:00Z"),
     )
     conn.commit()
-    watchable = list_titles(conn, watchable_only=True)
+    watchable = list_titles(conn, watchable_only=True, source="all")
     assert [t["slug"] for t in watchable] == ["ready-film"]
 
     with pytest.raises(FileNotFoundError, match="episode not found"):
@@ -794,7 +797,7 @@ def test_seed_repairs_orphan_title(catalog_env, tmp_path):
         slug="big-buck-bunny",
         attribution="CC-BY Blender Foundation",
     )
-    assert list_titles(conn, watchable_only=True) == []
+    assert list_titles(conn, watchable_only=True, source="all") == []
 
     fake_src = tmp_path / "source.mp4"
     _write_color_mp4(fake_src, color="green", duration=3.0)
@@ -816,7 +819,10 @@ def test_seed_repairs_orphan_title(catalog_env, tmp_path):
     assert eps
     assert eps[0]["video_key"] == original_video_key("big-buck-bunny", 1, 1)
     assert get_object_store().exists(eps[0]["video_key"])
-    assert any(t["slug"] == "big-buck-bunny" for t in list_titles(conn, watchable_only=True))
+    assert any(
+        t["slug"] == "big-buck-bunny"
+        for t in list_titles(conn, watchable_only=True, source="test")
+    )
 
 
 def test_extract_poster_skips_near_black_frames(tmp_path):

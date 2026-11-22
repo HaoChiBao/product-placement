@@ -87,33 +87,6 @@
 .watch-main {
   padding: 0 0 72px;
 }
-.watch-toolbar {
-  display: flex;
-  justify-content: flex-end;
-  padding: 14px clamp(16px, 3vw, 40px) 0;
-}
-.watch-source-toggle {
-  display: inline-flex;
-  border: 1px solid var(--w-line);
-  background: rgba(255, 255, 255, 0.04);
-  border-radius: 10px;
-  padding: 3px;
-  gap: 2px;
-}
-.watch-source-toggle button {
-  border: 0;
-  background: transparent;
-  color: var(--w-muted);
-  font-weight: 500;
-  font-size: 12.5px;
-  padding: 6px 12px;
-  border-radius: 7px;
-  cursor: pointer;
-}
-.watch-source-toggle button.on {
-  background: var(--w-elev);
-  color: var(--w-ink);
-}
 
 /* ---------- hero ---------- */
 .watch-hero {

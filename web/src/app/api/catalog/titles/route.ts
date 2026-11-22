@@ -10,11 +10,11 @@ function resolveSource(raw: string | null): "test" | "hosted" | "all" {
   if (fromQuery === "test" || fromQuery === "hosted" || fromQuery === "all") {
     return fromQuery
   }
-  const fromEnv = (process.env.VIDEO_SOURCE || "all").trim().toLowerCase()
+  const fromEnv = (process.env.VIDEO_SOURCE || "hosted").trim().toLowerCase()
   if (fromEnv === "test" || fromEnv === "hosted" || fromEnv === "all") {
     return fromEnv
   }
-  return "all"
+  return "hosted"
 }
 
 export async function GET(req: NextRequest) {
