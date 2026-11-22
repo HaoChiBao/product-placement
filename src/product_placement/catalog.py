@@ -977,9 +977,11 @@ def migrate_catalog_object_keys(conn: Connection | None = None) -> dict[str, Any
             skipped += 1
 
         # Moment frames: moments/<episode_id>/ → catalog/.../moments/
+        # Brand-scan frames are written straight to their brand folder; renumbering
+        # them here would copy them over the shared frames.
         moments = fetchall_dicts(
             conn,
-            "SELECT * FROM moments WHERE episode_id = ? ORDER BY start_s",
+            "SELECT * FROM moments WHERE episode_id = ? AND brand_id IS NULL ORDER BY start_s",
             (ep["id"],),
         )
         for i, mom in enumerate(moments, start=1):
