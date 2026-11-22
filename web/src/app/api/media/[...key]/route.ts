@@ -28,11 +28,19 @@ function contentTypeFor(key: string): string {
   )
 }
 
+function s3Endpoint(): string | undefined {
+  return (
+    process.env.AWS_ENDPOINT_URL_S3 ||
+    process.env.AWS_S3_ENDPOINT_URL ||
+    undefined
+  )
+}
+
 function s3ForcePathStyle(): boolean {
   const explicit = (process.env.AWS_S3_ADDRESSING_STYLE || "").trim().toLowerCase()
   if (explicit === "path") return true
   if (explicit === "virtual") return false
-  const ep = (process.env.AWS_ENDPOINT_URL_S3 || "").toLowerCase()
+  const ep = (s3Endpoint() || "").toLowerCase()
   return (
     ep.includes("localhost") ||
     ep.includes("127.0.0.1") ||
@@ -40,6 +48,23 @@ function s3ForcePathStyle(): boolean {
     ep.includes("minio") ||
     ep.includes(":9000")
   )
+}
+
+/** Clamp HTTP Range to [0, size-1]. Returns null if unsatisfiable. */
+function clampByteRange(
+  rangeHeader: string,
+  size: number
+): { start: number; end: number } | null {
+  if (size <= 0) return null
+  const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader)
+  if (!m) return null
+  let start = m[1] ? parseInt(m[1], 10) : 0
+  let end = m[2] ? parseInt(m[2], 10) : size - 1
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0) return null
+  if (start >= size) return null
+  end = Math.min(end, size - 1)
+  if (end < start) return null
+  return { start, end }
 }
 
 async function s3Range(
@@ -51,7 +76,7 @@ async function s3Range(
   )
   const client = new S3Client({
     region: process.env.AWS_DEFAULT_REGION || "us-east-1",
-    endpoint: process.env.AWS_ENDPOINT_URL_S3 || undefined,
+    endpoint: s3Endpoint(),
     forcePathStyle: s3ForcePathStyle(),
     credentials: {
       accessKeyId: process.env.AWS_ACCESS_KEY_ID || "",
@@ -66,29 +91,35 @@ async function s3Range(
   const type = head.ContentType || contentTypeFor(key)
 
   if (rangeHeader) {
-    const m = /bytes=(\d*)-(\d*)/.exec(rangeHeader)
-    if (m) {
-      const start = m[1] ? parseInt(m[1], 10) : 0
-      const end = m[2] ? parseInt(m[2], 10) : size - 1
-      const resp = await client.send(
-        new GetObjectCommand({
-          Bucket: bucket,
-          Key: key,
-          Range: `bytes=${start}-${end}`,
-        })
-      )
-      const bytes = Buffer.from(await resp.Body!.transformToByteArray())
-      return new NextResponse(bytes, {
-        status: 206,
+    const clamped = clampByteRange(rangeHeader, size)
+    if (!clamped) {
+      return new NextResponse(null, {
+        status: 416,
         headers: {
-          "Content-Type": type,
-          "Content-Length": String(bytes.length),
-          "Content-Range": `bytes ${start}-${end}/${size}`,
+          "Content-Range": `bytes */${size}`,
           "Accept-Ranges": "bytes",
-          "Cache-Control": "private, max-age=60",
         },
       })
     }
+    const { start, end } = clamped
+    const resp = await client.send(
+      new GetObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        Range: `bytes=${start}-${end}`,
+      })
+    )
+    const bytes = Buffer.from(await resp.Body!.transformToByteArray())
+    return new NextResponse(bytes, {
+      status: 206,
+      headers: {
+        "Content-Type": type,
+        "Content-Length": String(bytes.length),
+        "Content-Range": `bytes ${start}-${end}/${size}`,
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, max-age=60",
+      },
+    })
   }
 
   const resp = await client.send(
@@ -135,25 +166,33 @@ export async function GET(
     const range = req.headers.get("range")
 
     if (range) {
-      const m = /bytes=(\d*)-(\d*)/.exec(range)
-      if (m) {
-        const start = m[1] ? parseInt(m[1], 10) : 0
-        const end = m[2] ? parseInt(m[2], 10) : size - 1
-        const chunk = Buffer.alloc(end - start + 1)
-        const fd = fs.openSync(filePath, "r")
-        fs.readSync(fd, chunk, 0, chunk.length, start)
-        fs.closeSync(fd)
-        return new NextResponse(chunk, {
-          status: 206,
+      const clamped = clampByteRange(range, size)
+      if (!clamped) {
+        return new NextResponse(null, {
+          status: 416,
           headers: {
-            "Content-Type": type,
-            "Content-Length": String(chunk.length),
-            "Content-Range": `bytes ${start}-${end}/${size}`,
+            "Content-Range": `bytes */${size}`,
             "Accept-Ranges": "bytes",
-            "Cache-Control": "private, max-age=60",
           },
         })
       }
+      const { start, end } = clamped
+      const length = end - start + 1
+      const chunk = Buffer.alloc(length)
+      const fd = fs.openSync(filePath, "r")
+      const read = fs.readSync(fd, chunk, 0, length, start)
+      fs.closeSync(fd)
+      const body = read < length ? chunk.subarray(0, read) : chunk
+      return new NextResponse(body, {
+        status: 206,
+        headers: {
+          "Content-Type": type,
+          "Content-Length": String(body.length),
+          "Content-Range": `bytes ${start}-${start + body.length - 1}/${size}`,
+          "Accept-Ranges": "bytes",
+          "Cache-Control": "private, max-age=60",
+        },
+      })
     }
 
     const buf = fs.readFileSync(filePath)

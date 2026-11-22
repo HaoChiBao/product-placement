@@ -170,12 +170,16 @@ def run_swap_job(
     from product_placement.frame_swap import clamp_i2v_duration, run_frame_swap
 
     if brand_id:
-        from product_placement.brand import load_brand, primary_asset_path
+        # Optional file-backed override; catalog placements resolve assets via object store.
+        try:
+            from product_placement.brand import load_brand, primary_asset_path
 
-        brand = load_brand(brand_id)
-        asset = primary_asset_path(brand)
-        if asset and asset.is_file():
-            product_path = asset
+            brand = load_brand(brand_id)
+            asset = primary_asset_path(brand)
+            if asset and asset.is_file():
+                product_path = asset
+        except Exception:
+            pass
 
     if not confirm:
         raise ValueError("confirm=true is required before a paid (or mock) swap")
@@ -397,6 +401,13 @@ def run_placement_swap_job(
         placement = get_placement(conn, id=placement_id)
         if not placement:
             raise ValueError(f"placement not found: {placement_id}")
+
+        # Idempotent: a duplicate spawn must not re-bill / overwrite a ready clip.
+        cur_status = str(placement.get("status") or "")
+        if cur_status == "ready" and placement.get("clip_key"):
+            return placement
+        if cur_status == "rendering":
+            return placement
 
         moment = fetchone_dict(
             conn, "SELECT * FROM moments WHERE id = ?", (placement["moment_id"],)

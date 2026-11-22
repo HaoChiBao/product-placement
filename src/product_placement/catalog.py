@@ -335,9 +335,13 @@ def _brand_from_row(row: dict[str, Any], conn: Connection):
 
 
 def _score_moment_for_brand(moment: dict[str, Any], brand) -> dict[str, Any]:
-    """Score a stored moment against a brand; download frame when needed for full score."""
+    """Fast field-only brand fit for list/poll paths (no YOLO / frame download).
+
+    Full vision scoring runs once at suggest time; reloading ONNX on every
+    brand-page poll was stalling and OOMing the host.
+    """
     from product_placement.brand import product_aspect_ratio, primary_asset_path
-    from product_placement.brand_score import BrandFit, aspect_fit_score, score_brand_window
+    from product_placement.brand_score import BrandFit, aspect_fit_score
     from product_placement.vision import BBox
 
     region_raw = moment.get("region") or {}
@@ -354,7 +358,6 @@ def _score_moment_for_brand(moment: dict[str, Any], brand) -> dict[str, Any]:
     )
     whats = str(moment.get("whats_there") or "")
 
-    # Lightweight field-only scoring first.
     prefer = {p.lower() for p in brand.rules.prefer}
     avoid = {a.lower() for a in brand.rules.avoid}
     low = whats.lower()
@@ -363,45 +366,18 @@ def _score_moment_for_brand(moment: dict[str, Any], brand) -> dict[str, Any]:
     if any(p in low for p in prefer if p):
         class_boost = 0.55
     product_ar = None
-    asset = primary_asset_path(brand)
-    if asset and asset.is_file():
-        product_ar = product_aspect_ratio(asset)
+    try:
+        asset = primary_asset_path(brand)
+        if asset and asset.is_file():
+            product_ar = product_aspect_ratio(asset)
+    except Exception:
+        product_ar = None
     aspect = aspect_fit_score(region, product_ar)
-
-    frame_key = moment.get("frame_key")
-    if frame_key and not vetoed:
-        try:
-            import cv2
-            import numpy as np
-
-            from product_placement.models_store import ensure_yolox
-            from product_placement.vision import YoloX
-
-            store = get_object_store()
-            with tempfile.TemporaryDirectory() as tmp:
-                local = Path(tmp) / "frame.jpg"
-                store.get_file(frame_key, local)
-                frame = cv2.imread(str(local))
-                if frame is not None:
-                    yolox = YoloX(ensure_yolox())
-                    dets = yolox.detect(frame)
-                    fit = score_brand_window(
-                        frame_bgr=frame,
-                        region=region,
-                        whats_there=whats,
-                        dets=dets,
-                        brand=brand,
-                        product_ar=product_ar,
-                        clip_scorer=None,
-                    )
-                    return fit.to_dict()
-        except Exception as exc:
-            log.debug("full brand rescore failed, using field score: %s", exc)
 
     if vetoed:
         fit = BrandFit(
             vetoed=True,
-            veto_reason=f"whats_there mentions avoid term",
+            veto_reason="whats_there mentions avoid term",
             reason=f"vetoed: '{whats}' matches avoid",
             total=-1.0,
             class_boost=class_boost,
@@ -562,18 +538,33 @@ def upsert_placement(
         (brand_id, moment_id),
     )
     now = utc_now()
+    spawn = False
     if existing:
-        # Approve → queued for render pipeline
-        new_status = "queued" if status == "approved" else status
+        cur = str(existing.get("status") or "")
+        if status == "approved":
+            # Already in-flight or done — do not re-queue (avoids double Seedance bills).
+            if cur in {"queued", "rendering", "ready"}:
+                row = get_placement(conn, id=existing["id"])
+                assert row is not None
+                row["spawn"] = False
+                return row
+            new_status = "queued"
+            spawn = True
+        else:
+            new_status = status
         conn.execute(
             "UPDATE placements SET status = ?, updated_at = ?, episode_id = ? WHERE id = ?",
             (new_status, now, ep_id, existing["id"]),
         )
         conn.commit()
-        return get_placement(conn, id=existing["id"])  # type: ignore[return-value]
+        row = get_placement(conn, id=existing["id"])
+        assert row is not None
+        row["spawn"] = spawn
+        return row
 
     pid = placement_id or new_id()
     new_status = "queued" if status == "approved" else status
+    spawn = new_status == "queued"
     conn.execute(
         "INSERT INTO placements (id, brand_id, moment_id, episode_id, status, clip_key, "
         "error, test_mode, backend, created_at, updated_at) "
@@ -581,7 +572,10 @@ def upsert_placement(
         (pid, brand_id, moment_id, ep_id, new_status, None, None, int(test_mode), None, now, now),
     )
     conn.commit()
-    return get_placement(conn, id=pid)  # type: ignore[return-value]
+    row = get_placement(conn, id=pid)
+    assert row is not None
+    row["spawn"] = spawn
+    return row
 
 
 def update_placement(conn: Connection, placement_id: str, **fields: Any) -> dict[str, Any]:
@@ -789,13 +783,12 @@ def seed_blender_open_movies(
         init_schema(conn)
 
     assert conn is not None
-    existing = list_titles(conn)
-    if existing and not force:
-        return {"skipped": True, "reason": "titles already present", "titles": len(existing)}
-
+    # Idempotent fill: never bail just because some titles exist. A partial/
+    # timed-out seed leaves empty titles; retries must create missing episodes.
     cache = cache_dir or (data_dir() / "seed_cache")
     cache.mkdir(parents=True, exist_ok=True)
     created: list[dict[str, Any]] = []
+    skipped_existing = 0
 
     for src in BLENDER_SOURCES:
         title = get_title(conn, slug=src["slug"])
@@ -812,7 +805,22 @@ def seed_blender_open_movies(
         url = src["url"]
         ext = Path(urlparse_path(url)).suffix or ".mp4"
         raw_path = cache / f"{src['slug']}{ext}"
-        if not raw_path.is_file() or raw_path.stat().st_size == 0:
+        # Only download if any episode for this source is still missing.
+        missing_eps = False
+        for ep_spec in src["episodes"]:
+            prior = fetchone_dict(
+                conn,
+                "SELECT id FROM episodes WHERE title_id = ? AND season = ? AND episode_number = ?",
+                (title["id"], ep_spec["season"], ep_spec["episode"]),
+            )
+            if not prior:
+                missing_eps = True
+                break
+        if not missing_eps and not force:
+            skipped_existing += len(src["episodes"])
+            continue
+
+        if force or not raw_path.is_file() or raw_path.stat().st_size == 0:
             try:
                 download_fn(url, raw_path)
             except Exception as exc:
@@ -827,6 +835,7 @@ def seed_blender_open_movies(
                 (title["id"], ep_spec["season"], ep_spec["episode"]),
             )
             if prior:
+                skipped_existing += 1
                 continue
             clip = cache / f"{src['slug']}_s{ep_spec['season']}e{ep_spec['episode']}.mp4"
             try:
@@ -866,10 +875,13 @@ def seed_blender_open_movies(
     if own:
         conn.close()
     return {
-        "skipped": False,
+        # True only when nothing new was added (API can skip suggest spawn).
+        "skipped": len(created) == 0,
+        "reason": "all episodes already present" if not created else None,
         "episodes_created": len(created),
         "episodes": created,
         "titles": titles_out,
+        "skipped_existing": skipped_existing,
     }
 
 

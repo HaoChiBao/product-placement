@@ -62,9 +62,10 @@ export async function POST(req: NextRequest) {
       body.momentId,
       "--status",
       body.status,
-    ]) as { id: string; status: string }
+    ]) as { id: string; status: string; spawn?: boolean }
 
-    if (placement.status === "queued") {
+    // Only spawn when upsert newly transitioned into queued (not retries/double-clicks).
+    if (placement.spawn) {
       spawnPlacementSwap(placement.id, {
         testMode,
         confirm: true,

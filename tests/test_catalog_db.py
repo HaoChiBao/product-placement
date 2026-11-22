@@ -157,6 +157,18 @@ def test_create_title_episode_moment_brand_placement(catalog_env, tmp_path):
         status="approved",
     )
     assert placement["status"] == "queued"
+    assert placement.get("spawn") is True
+
+    # Re-approve while queued must not request another swap spawn.
+    again = upsert_placement(
+        conn,
+        brand_id=brand["id"],
+        moment_id=moment["id"],
+        status="approved",
+    )
+    assert again["status"] == "queued"
+    assert again.get("spawn") is False
+    assert again["id"] == placement["id"]
 
     rejected = upsert_placement(
         conn,
@@ -166,6 +178,16 @@ def test_create_title_episode_moment_brand_placement(catalog_env, tmp_path):
     )
     assert rejected["status"] == "rejected"
     assert rejected["id"] == placement["id"]
+
+    # Re-approve after reject should spawn again.
+    requeued = upsert_placement(
+        conn,
+        brand_id=brand["id"],
+        moment_id=moment["id"],
+        status="approved",
+    )
+    assert requeued["status"] == "queued"
+    assert requeued.get("spawn") is True
 
     moments = list_moments(conn, episode_id=ep["id"], brand_id=brand["id"])
     assert len(moments) == 1
@@ -277,6 +299,7 @@ def test_seed_blender_mocked(catalog_env, tmp_path, monkeypatch):
         (t.get("attribution") or "").startswith("CC-BY") for t in titles if t["slug"]
     )
 
-    # Second call without force skips
+    # Second call without force creates nothing new (but does not hard-bail early).
     again = seed_blender_open_movies(conn, force=False, download_fn=fake_download)
+    assert again["episodes_created"] == 0
     assert again["skipped"] is True
