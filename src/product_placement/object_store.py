@@ -63,6 +63,10 @@ class ObjectStore:
     def exists(self, key: str) -> bool:
         raise NotImplementedError
 
+    def list_keys(self, prefix: str = "") -> list[str]:
+        """List object keys under prefix (inclusive)."""
+        raise NotImplementedError
+
     def delete(self, key: str) -> None:
         raise NotImplementedError
 
@@ -83,10 +87,13 @@ class LocalObjectStore(ObjectStore):
     def put_file(
         self, local_path: str | Path, key: str, content_type: str | None = None
     ) -> str:
+        import shutil
+
         src = Path(local_path)
         dest = self._path(key)
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(src.read_bytes())
+        with open(src, "rb") as fsrc, open(dest, "wb") as fdst:
+            shutil.copyfileobj(fsrc, fdst, length=1024 * 1024)
         log.debug("local put_file key=%s bytes=%s", key, dest.stat().st_size)
         return key
 
@@ -98,12 +105,15 @@ class LocalObjectStore(ObjectStore):
         return key
 
     def get_file(self, key: str, dest: str | Path) -> Path:
+        import shutil
+
         src = self._path(key)
         if not src.is_file():
             raise FileNotFoundError(f"object not found: {key}")
         out = Path(dest)
         out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(src.read_bytes())
+        with open(src, "rb") as fsrc, open(out, "wb") as fdst:
+            shutil.copyfileobj(fsrc, fdst, length=1024 * 1024)
         return out
 
     def open_stream(self, key: str) -> BinaryIO:
@@ -123,6 +133,18 @@ class LocalObjectStore(ObjectStore):
 
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
+
+    def list_keys(self, prefix: str = "") -> list[str]:
+        cleaned = (prefix or "").lstrip("/").replace("..", "_")
+        keys: list[str] = []
+        for path in self.root.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(self.root).as_posix()
+            if cleaned and not rel.startswith(cleaned):
+                continue
+            keys.append(rel)
+        return sorted(keys)
 
     def delete(self, key: str) -> None:
         path = self._path(key)
@@ -231,6 +253,16 @@ class S3ObjectStore(ObjectStore):
             if code in {"404", "NoSuchKey", "NotFound"}:
                 return False
             raise
+
+    def list_keys(self, prefix: str = "") -> list[str]:
+        keys: list[str] = []
+        paginator = self.client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix or ""):
+            for obj in page.get("Contents") or []:
+                key = obj.get("Key")
+                if key:
+                    keys.append(str(key))
+        return keys
 
     def delete(self, key: str) -> None:
         self.client.delete_object(Bucket=self.bucket, Key=key)
