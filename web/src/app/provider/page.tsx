@@ -147,6 +147,27 @@ export default function ProviderPage() {
     }
   }
 
+  async function importMovies() {
+    setBusy(true)
+    setStatus("Importing from movies/…")
+    try {
+      const res = await fetch("/api/catalog/import-movies", { method: "POST" })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || "import failed")
+      await refreshTitles()
+      const n = Number(data.imported || 0)
+      setStatus(
+        n === 0
+          ? `No new movies (skipped ${data.skipped_existing || 0}, ignored ${data.ignored_non_video || 0})`
+          : `Imported ${n} movie${n === 1 ? "" : "s"} from movies/`
+      )
+    } catch (err) {
+      setStatus(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-[#f4f1ea] text-zinc-900">
       <SiteNav tone="light" />
@@ -167,6 +188,14 @@ export default function ProviderPage() {
             className="rounded-md bg-zinc-900 px-3 py-2 text-sm text-white disabled:opacity-50"
           >
             Seed Blender catalog
+          </button>
+          <button
+            type="button"
+            onClick={importMovies}
+            disabled={busy}
+            className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 disabled:opacity-50"
+          >
+            Import from movies/
           </button>
         </div>
 

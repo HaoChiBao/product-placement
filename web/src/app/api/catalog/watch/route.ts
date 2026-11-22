@@ -28,6 +28,14 @@ export async function GET(req: NextRequest) {
     return NextResponse.json(payload)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    const lower = message.toLowerCase()
+    if (
+      lower.includes("episode not found") ||
+      lower.includes("title not found") ||
+      lower.includes('"error": "not found"')
+    ) {
+      return NextResponse.json({ error: message }, { status: 404 })
+    }
     return NextResponse.json({ error: message }, { status: 500 })
   }
 }

@@ -5,10 +5,15 @@ import { catalogCmd, ensureCatalogDb } from "@/lib/catalog"
 export const runtime = "nodejs"
 export const maxDuration = 60
 
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
     ensureCatalogDb()
-    const titles = catalogCmd(["list-titles"])
+    const watchable = req.nextUrl.searchParams.get("watchable")
+    const args = ["list-titles"]
+    if (watchable === "1" || watchable === "true") {
+      args.push("--watchable")
+    }
+    const titles = catalogCmd(args)
     return NextResponse.json({ titles })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

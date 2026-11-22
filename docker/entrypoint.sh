@@ -18,9 +18,13 @@ mkdir -p "${DATA_DIR}/jobs" "${DATA_DIR}/objects"
   set +e
   echo "[catalog-boot] init-db $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   "${PYTHON_BIN}" -m product_placement.catalog init-db
+  echo "[catalog-boot] migrate-catalog-keys (idempotent)"
+  "${PYTHON_BIN}" -m product_placement.catalog migrate-catalog-keys
   if [[ "${SEED_CATALOG_ON_BOOT}" == "1" || "${SEED_CATALOG_ON_BOOT}" == "true" ]]; then
     echo "[catalog-boot] seed-blender (idempotent)"
     "${PYTHON_BIN}" -m product_placement.catalog seed-blender
+    echo "[catalog-boot] import-movies (idempotent)"
+    "${PYTHON_BIN}" -m product_placement.catalog import-movies
     echo "[catalog-boot] drain episode-suggest queue"
     "${PYTHON_BIN}" - <<'PY'
 from product_placement.db import fetchall_dicts, get_connection, init_schema
@@ -51,7 +55,7 @@ for ep in eps:
 PY
   fi
   echo "[catalog-boot] done $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-) >"${DATA_DIR}/catalog-boot.log" 2>&1 &
+) 2>&1 | tee -a "${DATA_DIR}/catalog-boot.log" &
 
 SERVER_JS="/app/web-standalone/server.js"
 if [[ ! -f "${SERVER_JS}" ]]; then
