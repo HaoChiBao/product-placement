@@ -2,6 +2,7 @@ import fs from "fs"
 import path from "path"
 import { NextRequest, NextResponse } from "next/server"
 
+import { isSafeBrandId } from "@/lib/brand-id"
 import {
   newRunId,
   repoRoot,
@@ -91,6 +92,9 @@ export async function POST(req: NextRequest) {
       String(n),
     ]
     if (brandId) {
+      if (!isSafeBrandId(brandId)) {
+        return NextResponse.json({ error: "invalid brand id" }, { status: 400 })
+      }
       args.push("--brand-id", brandId)
     }
 
