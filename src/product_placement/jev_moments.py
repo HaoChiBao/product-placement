@@ -138,10 +138,20 @@ def plan_sheets(
     return plans
 
 
-def moment_window(t: float, duration: float, window_s: float) -> tuple[float, float]:
-    if duration <= window_s:
-        return 0.0, max(duration, 0.0)
-    start = min(max(0.0, t - window_s / 2.0), max(0.0, duration - window_s))
+def moment_window(
+    t: float,
+    duration: float,
+    window_s: float,
+    *,
+    lo: float | None = None,
+    hi: float | None = None,
+) -> tuple[float, float]:
+    start_bound = 0.0 if lo is None else float(lo)
+    end_bound = float(duration) if hi is None else float(hi)
+    span = end_bound - start_bound
+    if span <= window_s:
+        return start_bound, max(end_bound, start_bound)
+    start = min(max(start_bound, t - window_s / 2.0), end_bound - window_s)
     return start, start + window_s
 
 
@@ -706,12 +716,19 @@ def suggest_with_jev(
 
         prepared: list[_Frame] = []
         for cand in short:
-            start_s, end_s = moment_window(cand.start_s, duration, window_s)
+            if shots:
+                shot = shots[_shot_index(shots, cand.start_s)]
+                lo, hi = shot.start_s, shot.end_s
+            else:
+                lo, hi = 0.0, duration
+            start_s, end_s = moment_window(
+                cand.start_s, duration, window_s, lo=lo, hi=hi
+            )
             cam = camera_motion_px(cap, start_s, end_s)
             if cam > MAX_CAM_MOTION:
                 _err(f"skip {cand.start_s:.1f}s camera motion {cam:.0f}px")
                 continue
-            frame = _read_frame_at(cap, cand.start_s)
+            frame = _read_frame_at(cap, cand.start_s, lo_s=lo, hi_s=hi)
             if frame is None:
                 _err(f"skip {cand.start_s:.1f}s unreadable frame")
                 continue

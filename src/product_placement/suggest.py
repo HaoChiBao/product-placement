@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import os
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -142,9 +144,25 @@ def _candidate_windows(
     return out
 
 
-def _read_frame_at(video: cv2.VideoCapture, t_s: float) -> np.ndarray | None:
+def _read_frame_at(
+    video: cv2.VideoCapture,
+    t_s: float,
+    *,
+    lo_s: float | None = None,
+    hi_s: float | None = None,
+) -> np.ndarray | None:
     fps = float(video.get(cv2.CAP_PROP_FPS) or 24.0)
-    video.set(cv2.CAP_PROP_POS_FRAMES, max(0, int(round(t_s * fps))))
+    idx = int(round(t_s * fps))
+    if lo_s is not None or hi_s is not None:
+        n = int(video.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        first = 0 if lo_s is None else max(0, math.ceil(lo_s * fps - 1e-6))
+        last = math.floor(((1e12 if hi_s is None else hi_s) * fps) - 1e-6)
+        if n:
+            last = min(last, n - 1)
+        if last < first:
+            last = first
+        idx = min(max(idx, first), last)
+    video.set(cv2.CAP_PROP_POS_FRAMES, max(0, idx))
     ok, frame = video.read()
     return frame if ok else None
 
@@ -317,6 +335,14 @@ def write_contact_sheet(
     return out_path
 
 
+def _log_jev_fallback(reason: str) -> None:
+    key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    text = " ".join(str(reason).split())
+    if key:
+        text = text.replace(key, "[redacted]")
+    print(f"[suggest] Jev fallback: {text[:300]}", file=sys.stderr, flush=True)
+
+
 def suggest(
     video_path: str | Path,
     n: int = 5,
@@ -333,20 +359,28 @@ def suggest(
     """Find 3–5 spread-out placement moments in a full-length video.
 
     When ``OPENROUTER_API_KEY`` is set, Jev on OpenRouter screens contact sheets and
-    boxes a full frame. Otherwise YuNet + YOLOX score stable windows. A brand
-    re-ranks and can veto on the classical path, and is written into the Jev prompt.
+    boxes a full frame, falling back to YuNet + YOLOX if Jev returns nothing or raises.
+    Otherwise the classical scorer runs. A brand re-ranks and can veto on that path,
+    and is written into the Jev prompt.
     """
     if (os.environ.get("OPENROUTER_API_KEY") or "").strip():
         from product_placement.jev_moments import suggest_with_jev
 
-        return suggest_with_jev(
-            video_path,
-            n,
-            out_dir=out_dir,
-            window_s=window_s,
-            brand=brand,
-            diagnostics=diagnostics,
-        )
+        try:
+            moments = suggest_with_jev(
+                video_path,
+                n,
+                out_dir=out_dir,
+                window_s=window_s,
+                brand=brand,
+                diagnostics=diagnostics,
+            )
+        except Exception as exc:
+            _log_jev_fallback(str(exc) or exc.__class__.__name__)
+        else:
+            if moments:
+                return moments
+            _log_jev_fallback("no moments")
 
     video_path = Path(video_path)
     out_dir = Path(out_dir)
