@@ -31,6 +31,7 @@ export async function POST(req: NextRequest) {
     const confirm = String(form.get("confirm") || "") === "true"
     const productPathField = String(form.get("productPath") || "").trim()
     const productFile = form.get("product")
+    const brandId = String(form.get("brandId") || "").trim()
 
     if (!confirm) {
       return NextResponse.json(
@@ -60,7 +61,20 @@ export async function POST(req: NextRequest) {
     }
 
     let productPath = ""
-    if (productPathField) {
+    if (brandId) {
+      const { dataRoot } = await import("@/lib/runs")
+      const brandMeta = path.join(dataRoot(), "brands", brandId, "brand.json")
+      if (fs.existsSync(brandMeta)) {
+        const brand = JSON.parse(fs.readFileSync(brandMeta, "utf8")) as {
+          assets?: string[]
+        }
+        const asset = (brand.assets || [])[0]
+        if (asset) {
+          productPath = path.join(dataRoot(), "brands", brandId, asset)
+        }
+      }
+    }
+    if (!productPath && productPathField) {
       const abs = path.isAbsolute(productPathField)
         ? productPathField
         : path.resolve(repoRoot(), productPathField)
@@ -68,16 +82,17 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: `product not found: ${abs}` }, { status: 400 })
       }
       productPath = abs
-    } else if (productFile && productFile instanceof File) {
+    } else if (!productPath && productFile && productFile instanceof File) {
       const uploadPath = path.join(
         out,
         "product" + path.extname(productFile.name || ".png")
       )
       fs.writeFileSync(uploadPath, Buffer.from(await productFile.arrayBuffer()))
       productPath = uploadPath
-    } else {
+    }
+    if (!productPath || !fs.existsSync(productPath)) {
       return NextResponse.json(
-        { error: "Provide a product image upload or productPath" },
+        { error: "Provide a product image, productPath, or brandId with assets" },
         { status: 400 }
       )
     }
@@ -109,31 +124,30 @@ export async function POST(req: NextRequest) {
     }
     writeJob(jobId, status)
 
-    spawnJob(
-      [
-        "-m",
-        "product_placement.jobs",
-        "swap",
-        "--job-id",
-        jobId,
-        "--video",
-        video,
-        "--product",
-        productPath,
-        "--start",
-        String(moment.start_s),
-        "--end",
-        String(moment.end_s),
-        "--region-json",
-        JSON.stringify(region),
-        "--target",
-        swapTarget,
-        "--confirm",
-        "--resolution",
-        "720p",
-      ],
-      { jobId }
-    )
+    const args = [
+      "-m",
+      "product_placement.jobs",
+      "swap",
+      "--job-id",
+      jobId,
+      "--video",
+      video,
+      "--product",
+      productPath,
+      "--start",
+      String(moment.start_s),
+      "--end",
+      String(moment.end_s),
+      "--region-json",
+      JSON.stringify(region),
+      "--target",
+      swapTarget,
+      "--confirm",
+      "--resolution",
+      "720p",
+    ]
+    if (brandId) args.push("--brand-id", brandId)
+    spawnJob(args, { jobId })
 
     return NextResponse.json({ jobId, estimated_cost_usd: estimated, ...status })
   } catch (err) {

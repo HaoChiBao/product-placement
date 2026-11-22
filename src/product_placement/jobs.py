@@ -67,9 +67,16 @@ def run_suggest_job(
     *,
     video_path: str | Path,
     n: int = 5,
+    brand_id: str | None = None,
 ) -> dict[str, Any]:
     from product_placement.crop_stitch import probe_video
     from product_placement.suggest import clamp_n, suggest
+
+    brand = None
+    if brand_id:
+        from product_placement.brand import load_brand
+
+        brand = load_brand(brand_id)
 
     out = job_dir(job_id)
     frames = out / "frames"
@@ -78,8 +85,10 @@ def run_suggest_job(
         job_id,
         type="suggest",
         status="running",
-        progress="Scanning shots · faces · props",
+        progress="Scanning shots · faces · props"
+        + (f" · brand {brand.name}" if brand else ""),
         created_at=utc_now(),
+        brand_id=brand_id,
     )
     t0 = time.perf_counter()
     try:
@@ -87,6 +96,8 @@ def run_suggest_job(
             video_path=video_path,
             n=clamp_n(n),
             out_dir=out,
+            brand=brand,
+            use_clip=True,
         )
         elapsed = time.perf_counter() - t0
         # Persist a lightweight index the web layer can serve.
@@ -101,6 +112,10 @@ def run_suggest_job(
             d["frame"] = str(local)
             moment_dicts.append(d)
 
+        moments_path = out / "moments.json"
+        prior = {}
+        if moments_path.is_file():
+            prior = json.loads(moments_path.read_text())
         result = {
             "runId": job_id,
             "video": str(video_path),
@@ -110,6 +125,8 @@ def run_suggest_job(
             "elapsed_s": round(elapsed, 3),
             "moments": moment_dicts,
             "contact_sheet": str(out / "contact_sheet.jpg"),
+            "brand_id": brand_id,
+            "vetoed": prior.get("vetoed") or [],
         }
         (out / "moments.json").write_text(json.dumps(result, indent=2) + "\n")
         (out / "source.txt").write_text(str(video_path) + "\n")
@@ -142,6 +159,7 @@ def run_swap_job(
     target: str,
     confirm: bool,
     resolution: str = "720p",
+    brand_id: str | None = None,
 ) -> dict[str, Any]:
     from product_placement.crop_stitch import (
         MAX_INPUT_S,
@@ -155,6 +173,17 @@ def run_swap_job(
         stitch_edit_into_moment,
     )
     from product_placement.higgsfield import default_swap_prompt
+
+    brand = None
+    prompt = None
+    if brand_id:
+        from product_placement.brand import brand_swap_prompt, load_brand, primary_asset_path
+
+        brand = load_brand(brand_id)
+        asset = primary_asset_path(brand)
+        if asset and asset.is_file():
+            product_path = asset
+        prompt = brand_swap_prompt(brand, target)
 
     if not confirm:
         raise ValueError("confirm=true is required before a paid (or mock) swap")
@@ -212,7 +241,7 @@ def run_swap_job(
             result = seedance_edit(
                 crop_hold,
                 Path(product_path),
-                default_swap_prompt(target),
+                prompt or default_swap_prompt(target),
                 out_path=edited,
                 work_dir=work / "hf",
                 resolution="720p",
@@ -277,6 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
     sug.add_argument("--job-id", required=True)
     sug.add_argument("--video", required=True)
     sug.add_argument("-n", type=int, default=5)
+    sug.add_argument("--brand-id", default=None)
 
     sw = sub.add_parser("swap")
     sw.add_argument("--job-id", required=True)
@@ -288,6 +318,7 @@ def build_parser() -> argparse.ArgumentParser:
     sw.add_argument("--target", required=True)
     sw.add_argument("--confirm", action="store_true")
     sw.add_argument("--resolution", default="720p")
+    sw.add_argument("--brand-id", default=None)
     return p
 
 
@@ -296,7 +327,12 @@ def main(argv: list[str] | None = None) -> None:
     job_id = getattr(args, "job_id", None)
     try:
         if args.command == "suggest":
-            run_suggest_job(args.job_id, video_path=args.video, n=args.n)
+            run_suggest_job(
+                args.job_id,
+                video_path=args.video,
+                n=args.n,
+                brand_id=args.brand_id,
+            )
             return
         if args.command == "swap":
             region = json.loads(args.region_json)
@@ -310,6 +346,7 @@ def main(argv: list[str] | None = None) -> None:
                 target=args.target,
                 confirm=bool(args.confirm),
                 resolution=args.resolution,
+                brand_id=args.brand_id,
             )
             return
         raise SystemExit(f"unknown command {args.command}")

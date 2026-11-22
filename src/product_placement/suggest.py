@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -39,9 +40,10 @@ class Moment:
     reason: str
     frame_w: int = 0
     frame_h: int = 0
+    brand_fit: dict[str, Any] | None = None
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "start_s": round(self.start_s, 3),
             "end_s": round(self.end_s, 3),
             "frame": str(self.frame_path),
@@ -52,6 +54,9 @@ class Moment:
             "score": round(self.score, 4),
             "reason": self.reason,
         }
+        if self.brand_fit is not None:
+            d["brand_fit"] = self.brand_fit
+        return d
 
 
 @dataclass
@@ -64,6 +69,8 @@ class _Cand:
     score: float
     reason: str
     shot_i: int
+    brand_fit: dict[str, Any] | None = None
+    dets: list = field(default_factory=list)
 
 
 def clamp_n(n: int) -> int:
@@ -148,15 +155,19 @@ def _score_window(
     faces: FaceDetector,
     props: YoloX,
     shot_i: int,
-) -> _Cand | None:
+    *,
+    brand=None,
+    product_ar: float | None = None,
+    clip_scorer=None,
+) -> tuple[_Cand | None, str | None]:
     mid = 0.5 * (start_s + end_s)
     frame = _read_frame_at(video, mid)
     if frame is None:
-        return None
+        return None, None
     h, w = frame.shape[:2]
     cam = camera_motion_px(video, start_s, end_s)
     if cam > MAX_CAM_MOTION:
-        return None
+        return None, None
 
     face_boxes = faces.detect(frame)
     # Also peek near the ends so a face that swings in doesn't sneak past.
@@ -173,19 +184,55 @@ def _score_window(
     face_boxes = uniq
 
     dets = props.detect(frame)
-    placement = choose_placement(dets, face_boxes, w, h)
+    preferred = set()
+    min_area = 0.02
+    if brand is not None:
+        from product_placement.brand_score import preferred_prop_labels
+
+        preferred = preferred_prop_labels(brand.rules)
+        min_area = float(brand.rules.min_area or 0.02)
+
+    placement = choose_placement(
+        dets, face_boxes, w, h, preferred_labels=preferred or None
+    )
     if placement is None:
-        return None
+        return None, None
     region, whats, det_score = placement
     if not region_avoids_faces(region, face_boxes):
-        return None
+        return None, None
+
+    brand_fit_dict = None
+    brand_total = 0.0
+    if brand is not None:
+        from product_placement.brand_score import reshape_region_to_product, score_brand_window
+
+        region = reshape_region_to_product(
+            region, w, h, face_boxes, product_ar, min_area_frac=min_area
+        )
+        if region.area < min_area * w * h:
+            return None, None
+        fit = score_brand_window(
+            frame_bgr=frame,
+            region=region,
+            whats_there=whats,
+            dets=dets,
+            brand=brand,
+            product_ar=product_ar,
+            clip_scorer=clip_scorer,
+        )
+        if fit.vetoed:
+            return None, fit.veto_reason or fit.reason
+        brand_fit_dict = fit.to_dict()
+        brand_total = fit.total
 
     stability = max(0.0, 1.0 - cam / MAX_CAM_MOTION)
     face_penalty = min(1.0, len(face_boxes) * 0.08)
     dur = end_s - start_s
     # Mild preference for full edit-length windows without discarding short props.
     length_factor = 1.0 if dur + 1e-6 >= WINDOW_S else 0.85 + 0.15 * (dur / WINDOW_S)
-    score = (0.55 * det_score + 0.35 * stability + 0.10 * (1.0 - face_penalty)) * length_factor
+    base = (0.55 * det_score + 0.35 * stability + 0.10 * (1.0 - face_penalty)) * length_factor
+    # Brand contribution re-ranks without erasing base quality.
+    score = base if brand is None else (0.55 * base + 0.45 * brand_total)
     if dur + 1e-6 >= WINDOW_S:
         length_note = f"Stable {dur:.0f}s window"
     else:
@@ -194,15 +241,22 @@ def _score_window(
         f"{length_note}; {whats} "
         f"(det {det_score:.2f}, cam {cam:.1f}px, faces {len(face_boxes)})"
     )
-    return _Cand(
-        start_s=start_s,
-        end_s=end_s,
-        frame=frame,
-        region=region,
-        whats_there=whats,
-        score=score,
-        reason=reason,
-        shot_i=shot_i,
+    if brand_fit_dict and brand_fit_dict.get("reason"):
+        reason = f"{reason} · {brand_fit_dict['reason']}"
+    return (
+        _Cand(
+            start_s=start_s,
+            end_s=end_s,
+            frame=frame,
+            region=region,
+            whats_there=whats,
+            score=score,
+            reason=reason,
+            shot_i=shot_i,
+            brand_fit=brand_fit_dict,
+            dets=list(dets),
+        ),
+        None,
     )
 
 
@@ -269,8 +323,16 @@ def suggest(
     window_s: float = WINDOW_S,
     yunet_path: str | Path | None = None,
     yolox_path: str | Path | None = None,
+    brand=None,
+    product_image: str | Path | None = None,
+    use_clip: bool = True,
+    diagnostics: dict[str, Any] | None = None,
 ) -> list[Moment]:
-    """Find 3–5 spread-out ~5s placement moments in a full-length video."""
+    """Find 3–5 spread-out ~5s placement moments in a full-length video.
+
+    When ``brand`` is set, prefer/avoid rules re-rank candidates and can veto windows.
+    Without a brand, behavior matches the original scorer.
+    """
     video_path = Path(video_path)
     out_dir = Path(out_dir)
     frames_dir = out_dir / "frames"
@@ -296,14 +358,48 @@ def suggest(
     face_det = FaceDetector(str(face_model))
     prop_det = YoloX(str(prop_model), conf_threshold=0.32)
 
+    from product_placement.brand import product_aspect_ratio
+
+    product_ar = product_aspect_ratio(product_image) if product_image else None
+    if brand is not None and product_ar is None and getattr(brand, "assets", None):
+        from product_placement.brand import primary_asset_path
+
+        asset = primary_asset_path(brand)
+        product_ar = product_aspect_ratio(asset)
+
+    clip_scorer = None
+    if brand is not None and use_clip:
+        try:
+            from product_placement.clip_onnx import ClipOnnx
+
+            clip_scorer = ClipOnnx()
+            if not clip_scorer.available:
+                clip_scorer = None
+        except Exception:
+            clip_scorer = None
+
     cands: list[_Cand] = []
+    vetoed: list[dict[str, Any]] = []
     for shot_i, start_s, end_s in windows:
-        cand = _score_window(video, start_s, end_s, face_det, prop_det, shot_i)
+        cand, veto = _score_window(
+            video,
+            start_s,
+            end_s,
+            face_det,
+            prop_det,
+            shot_i,
+            brand=brand,
+            product_ar=product_ar,
+            clip_scorer=clip_scorer,
+        )
+        if veto:
+            vetoed.append({"start_s": start_s, "end_s": end_s, "reason": veto})
+            continue
         if cand is not None:
             cands.append(cand)
 
     # Last resort on short clips with no COCO prop/surface: weak face-free patch.
-    if not cands and duration <= 20.0:
+    if not cands and duration <= 20.0 and brand is None:
         for shot_i, start_s, end_s in windows:
             mid = 0.5 * (start_s + end_s)
             frame = _read_frame_at(video, mid)
@@ -336,10 +432,16 @@ def suggest(
                 )
             )
 
+    if diagnostics is not None:
+        diagnostics["vetoed"] = vetoed
+        diagnostics["candidates"] = len(cands)
+        diagnostics["brand_id"] = getattr(brand, "id", None)
+
     if not cands:
         video.release()
         raise RuntimeError(
             "no placement moments found (need stable, face-clear windows with a surface/prop)"
+            + (f"; vetoed {len(vetoed)} brand windows" if vetoed else "")
         )
 
     # Gap is on start times; keep it small enough that adjacent short shots can both survive.
@@ -365,6 +467,7 @@ def suggest(
                 reason=c.reason,
                 frame_w=int(fw),
                 frame_h=int(fh),
+                brand_fit=c.brand_fit,
             )
         )
         sheet_frames.append(c.frame)
@@ -379,6 +482,8 @@ def suggest(
         "duration_s": round(duration, 3),
         "moments": [m.to_dict() for m in moments],
         "contact_sheet": str(sheet_path),
+        "brand_id": getattr(brand, "id", None),
+        "vetoed": vetoed,
     }
     (out_dir / "moments.json").write_text(json.dumps(payload, indent=2) + "\n")
     video.release()

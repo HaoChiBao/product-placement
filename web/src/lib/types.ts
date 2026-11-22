@@ -1,5 +1,18 @@
 export type Region = { x: number; y: number; w: number; h: number }
 
+export type BrandFit = {
+  prefer_scores?: Record<string, number>
+  avoid_scores?: Record<string, number>
+  class_boost?: number
+  aspect_fit?: number
+  clip_prefer?: number
+  clip_avoid?: number
+  vetoed?: boolean
+  veto_reason?: string | null
+  reason?: string
+  total?: number
+}
+
 export type Moment = {
   start_s: number
   end_s: number
@@ -10,8 +23,25 @@ export type Moment = {
   whats_there: string
   score: number
   reason: string
+  brand_fit?: BrandFit | null
   frameUrl?: string
   clipUrl?: string
+}
+
+export type BrandRules = {
+  prefer: string[]
+  avoid: string[]
+  placement: string
+  min_area: number
+}
+
+export type Brand = {
+  id: string
+  name: string
+  brief: string
+  assets: string[]
+  rules: BrandRules
+  asset_urls?: string[]
 }
 
 export type SuggestRun = {
@@ -23,6 +53,8 @@ export type SuggestRun = {
   elapsed_s?: number
   moments: Moment[]
   contact_sheet?: string
+  brand_id?: string | null
+  vetoed?: { start_s: number; end_s: number; reason: string }[]
 }
 
 export type JobStatus = {

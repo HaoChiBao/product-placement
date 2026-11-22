@@ -23,10 +23,12 @@ export async function POST(req: NextRequest) {
     const contentType = req.headers.get("content-type") || ""
     let videoPath = ""
     let n = 5
+    let brandId = ""
 
     if (contentType.includes("multipart/form-data")) {
       const form = await req.formData()
       n = Math.max(3, Math.min(5, Number(form.get("n") || 5)))
+      brandId = String(form.get("brandId") || "").trim()
       const pathField = String(form.get("path") || "").trim()
       const file = form.get("file")
 
@@ -50,8 +52,9 @@ export async function POST(req: NextRequest) {
         )
       }
     } else {
-      const body = (await req.json()) as { path?: string; n?: number }
+      const body = (await req.json()) as { path?: string; n?: number; brandId?: string }
       n = Math.max(3, Math.min(5, Number(body.n || 5)))
+      brandId = String(body.brandId || "").trim()
       if (!body.path) {
         return NextResponse.json({ error: "path required" }, { status: 400 })
       }
@@ -76,22 +79,24 @@ export async function POST(req: NextRequest) {
     }
     writeJob(jobId, status)
 
-    spawnJob(
-      [
-        "-m",
-        "product_placement.jobs",
-        "suggest",
-        "--job-id",
-        jobId,
-        "--video",
-        videoPath,
-        "-n",
-        String(n),
-      ],
-      { jobId }
-    )
+    const args = [
+      "-m",
+      "product_placement.jobs",
+      "suggest",
+      "--job-id",
+      jobId,
+      "--video",
+      videoPath,
+      "-n",
+      String(n),
+    ]
+    if (brandId) {
+      args.push("--brand-id", brandId)
+    }
 
-    return NextResponse.json({ jobId, ...status })
+    spawnJob(args, { jobId })
+
+    return NextResponse.json({ jobId, brandId: brandId || null, ...status })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     return NextResponse.json({ error: message }, { status: 500 })
