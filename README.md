@@ -121,11 +121,13 @@ python scripts/compare_moment_models.py
 python scripts/compare_moment_models.py --models google/gemini-3.8-flash openai/gpt-6.1-terra -n 5
 ```
 
-To run the whole app on those clips: start the web app with the root `.env` loaded (Next only reads `web/.env*` on its own), upload a clip as a title and episode (`POST /api/catalog/titles`, then `POST /api/catalog/titles/<id>/episodes` with the `video` file), onboard a brand at `/`, and open the clip from `/videos`. With `MOCK_HIGGSFIELD=1`, approving a spot runs the free local mock swap.
+To run the whole app on those clips: start the web app with the root `.env` loaded (`npm run dev:env`; plain `npm run dev` only reads `web/.env*`), upload a clip as a title and episode (`POST /api/catalog/titles`, then `POST /api/catalog/titles/<id>/episodes` with the `video` file), onboard a brand at `/`, and open the clip from `/videos`. With `MOCK_HIGGSFIELD=1`, approving a spot runs the free local mock swap.
 
 ```bash
-cd web && node --env-file=../.env node_modules/next/dist/bin/next dev
+cd web && npm run dev:env
 ```
+
+The finder uses `google/gemini-3.8-flash` unless `MOMENT_MODEL` says otherwise. On Windows the app finds the repo's `.venv\Scripts\python.exe` on its own; elsewhere it uses `.venv/bin/python`, or set `PYTHON_BIN`.
 
 ## Swap
 

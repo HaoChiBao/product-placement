@@ -47,9 +47,13 @@ export function pythonBin(): string {
   const env = (process.env.PYTHON_BIN || "").trim()
   if (env) return env
   // Prefer system/interpreter on PATH — do not require the repo .venv.
-  const venv = path.join(repoRoot(), ".venv", "bin", "python")
+  // Windows venvs put the interpreter in Scripts\python.exe, not bin/python.
+  const win = process.platform === "win32"
+  const venv = win
+    ? path.join(repoRoot(), ".venv", "Scripts", "python.exe")
+    : path.join(repoRoot(), ".venv", "bin", "python")
   if (process.env.NODE_ENV !== "production" && fs.existsSync(venv)) return venv
-  return "python3"
+  return win ? "python" : "python3"
 }
 
 export function pythonEnv(): NodeJS.ProcessEnv {
