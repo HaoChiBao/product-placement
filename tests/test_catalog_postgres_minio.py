@@ -128,3 +128,6 @@ def test_postgres_rows_and_minio_objects(pg_minio_env, tmp_path):
     got = fetchone_dict(conn, "SELECT status FROM placements WHERE id = ?", (pl["id"],))
     assert got["status"] == "queued"
     assert list_titles(conn)
+    # Regression: watchable filter uses a bound LIKE param (literal % breaks psycopg).
+    watchable = list_titles(conn, watchable_only=True)
+    assert any(t["slug"] == "pg-film" for t in watchable)

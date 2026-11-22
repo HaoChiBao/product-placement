@@ -159,14 +159,16 @@ def list_titles(
     if not watchable_only:
         return fetchall_dicts(conn, "SELECT * FROM titles ORDER BY created_at")
     # Ready-to-watch only: catalog original present, never processing/failed or movies/.
+    # Bind the LIKE pattern — a literal 'movies/%' breaks psycopg ( % is not %% / %s ).
     return fetchall_dicts(
         conn,
         "SELECT DISTINCT t.* FROM titles t "
         "INNER JOIN episodes e ON e.title_id = t.id "
         "WHERE e.video_key IS NOT NULL AND TRIM(e.video_key) != '' "
-        "AND e.video_key NOT LIKE 'movies/%' "
+        "AND e.video_key NOT LIKE ? "
         "AND LOWER(COALESCE(e.suggest_status, '')) NOT IN ('processing', 'failed') "
         "ORDER BY t.created_at",
+        (f"{MOVIES_PREFIX}%",),
     )
 
 
