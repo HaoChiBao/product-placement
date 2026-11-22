@@ -36,6 +36,24 @@ def slugify(name: str) -> str:
     return s or "title"
 
 
+def catalog_episode_prefix(slug: str, season: int, episode: int) -> str:
+    """Stable object prefix so a preload can land before the row exists."""
+    return f"catalog/{slug}/s{int(season):02d}e{int(episode):02d}"
+
+
+def catalog_video_key(slug: str, season: int, episode: int, ext: str = ".mp4") -> str:
+    suffix = ext if ext.startswith(".") else f".{ext}"
+    return f"{catalog_episode_prefix(slug, season, episode)}/video{suffix}"
+
+
+def catalog_poster_key(slug: str, season: int, episode: int) -> str:
+    return f"{catalog_episode_prefix(slug, season, episode)}/poster.jpg"
+
+
+def catalog_title_poster_key(slug: str) -> str:
+    return f"catalog/{slug}/poster.jpg"
+
+
 # ---------------------------------------------------------------------------
 # Titles
 # ---------------------------------------------------------------------------
@@ -189,11 +207,13 @@ def create_episode(
     suggest_status: str = "queued",
     episode_id: str | None = None,
 ) -> dict[str, Any]:
-    if not get_title(conn, id=title_id):
+    title = get_title(conn, id=title_id)
+    if not title:
         raise ValueError(f"title not found: {title_id}")
 
     store = get_object_store()
     eid = episode_id or new_id()
+    slug = str(title.get("slug") or "title")
     vkey = video_key
     pkey = poster_key
     dur = duration_s
@@ -202,14 +222,30 @@ def create_episode(
         vp = Path(video_path)
         if not vp.is_file():
             raise FileNotFoundError(f"video not found: {vp}")
-        vkey = vkey or f"episodes/{eid}/video{vp.suffix or '.mp4'}"
+        vkey = vkey or catalog_video_key(slug, season, episode, vp.suffix or ".mp4")
         store.put_file(vp, vkey, content_type=_video_content_type(vp))
         dur = dur if dur is not None else _probe_duration(vp)
         with tempfile.TemporaryDirectory() as tmp:
             poster = Path(tmp) / "poster.jpg"
             _extract_poster_frame(vp, poster, at_s=1.0)
-            pkey = pkey or f"episodes/{eid}/poster.jpg"
+            pkey = pkey or catalog_poster_key(slug, season, episode)
             store.put_file(poster, pkey, content_type="image/jpeg")
+            title_poster = catalog_title_poster_key(slug)
+            if not title.get("poster_key"):
+                store.put_file(poster, title_poster, content_type="image/jpeg")
+                conn.execute(
+                    "UPDATE titles SET poster_key = ? WHERE id = ?",
+                    (title_poster, title_id),
+                )
+    elif vkey:
+        if not store.exists(vkey):
+            raise FileNotFoundError(
+                f"object not in store: {vkey} "
+                f"(expected {catalog_video_key(slug, season, episode)})"
+            )
+        pkey = pkey or catalog_poster_key(slug, season, episode)
+        if not store.exists(pkey):
+            pkey = None
 
     now = utc_now()
     conn.execute(
@@ -231,6 +267,56 @@ def create_episode(
     )
     conn.commit()
     return get_episode(conn, id=eid)  # type: ignore[return-value]
+
+
+def register_preloaded_episode(
+    conn: Connection,
+    *,
+    name: str,
+    kind: str = "movie",
+    slug: str | None = None,
+    synopsis: str = "",
+    attribution: str = "",
+    season: int = 1,
+    episode: int = 1,
+    episode_name: str | None = None,
+    video_key: str | None = None,
+) -> dict[str, Any]:
+    """Point a catalog row at an object already in the store. Does not upload."""
+    slug_val = slug or slugify(name)
+    title = get_title(conn, slug=slug_val)
+    if not title:
+        title = create_title(
+            conn,
+            name=name,
+            kind=kind if kind in {"movie", "series"} else "movie",
+            synopsis=synopsis,
+            attribution=attribution,
+            slug=slug_val,
+        )
+    key = video_key or catalog_video_key(slug_val, season, episode)
+    prior = fetchone_dict(
+        conn,
+        "SELECT id FROM episodes WHERE title_id = ? AND season = ? AND episode_number = ?",
+        (title["id"], int(season), int(episode)),
+    )
+    if prior:
+        existing = get_episode(conn, id=prior["id"])
+        return {
+            "title": get_title(conn, id=title["id"]),
+            "episode": existing,
+            "video_key": (existing or {}).get("video_key") or key,
+        }
+    ep = create_episode(
+        conn,
+        title_id=title["id"],
+        name=episode_name or (name if kind == "movie" else f"Episode {episode}"),
+        season=season,
+        episode=episode,
+        video_key=key,
+        suggest_status="queued",
+    )
+    return {"title": get_title(conn, id=title["id"]), "episode": ep, "video_key": key}
 
 
 def _video_content_type(path: Path) -> str:
@@ -862,14 +948,9 @@ def seed_blender_open_movies(
                 suggest_status="queued",
             )
             created.append(ep)
-            # Promote first episode poster onto the title for catalog grids.
-            if ep.get("poster_key") and not title.get("poster_key"):
-                conn.execute(
-                    "UPDATE titles SET poster_key = ? WHERE id = ?",
-                    (ep["poster_key"], title["id"]),
-                )
-                conn.commit()
-                title["poster_key"] = ep["poster_key"]
+            # create_episode already writes catalog/<slug>/poster.jpg when the
+            # title has none. Refresh so a later episode does not see a stale row.
+            title = get_title(conn, id=title["id"]) or title
 
     titles_out = list_titles(conn)
     # Crash recovery + queue: reclaim abandoned 'running', then list claimable rows.
@@ -952,7 +1033,23 @@ def build_parser() -> argparse.ArgumentParser:
     ce.add_argument("--name", required=True)
     ce.add_argument("--season", type=int, default=1)
     ce.add_argument("--episode", type=int, default=1)
-    ce.add_argument("--video-path", required=True)
+    ce.add_argument("--video-path", default=None)
+    ce.add_argument("--video-key", default=None)
+
+    rp = add("register-preload")
+    rp.add_argument("--name", required=True)
+    rp.add_argument("--kind", default="movie", choices=("movie", "series"))
+    rp.add_argument("--slug", default=None)
+    rp.add_argument("--synopsis", default="")
+    rp.add_argument("--attribution", default="")
+    rp.add_argument("--season", type=int, default=1)
+    rp.add_argument("--episode", type=int, default=1)
+    rp.add_argument("--episode-name", default=None)
+    rp.add_argument(
+        "--video-key",
+        default=None,
+        help="Existing object key. Defaults to catalog/<slug>/sXXeYY/video.mp4",
+    )
 
     lm = add("list-moments")
     lm.add_argument("--episode-id", required=True)
@@ -1036,6 +1133,8 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         if args.command == "create-episode":
+            if not args.video_path and not args.video_key:
+                raise SystemExit("create-episode needs --video-path or --video-key")
             _print_json(
                 create_episode(
                     conn,
@@ -1044,6 +1143,24 @@ def main(argv: list[str] | None = None) -> None:
                     season=args.season,
                     episode=args.episode,
                     video_path=args.video_path,
+                    video_key=args.video_key,
+                )
+            )
+            return
+
+        if args.command == "register-preload":
+            _print_json(
+                register_preloaded_episode(
+                    conn,
+                    name=args.name,
+                    kind=args.kind,
+                    slug=args.slug,
+                    synopsis=args.synopsis,
+                    attribution=args.attribution,
+                    season=args.season,
+                    episode=args.episode,
+                    episode_name=args.episode_name,
+                    video_key=args.video_key,
                 )
             )
             return
