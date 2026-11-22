@@ -165,6 +165,58 @@ def test_poll_stops_on_terminal_failure(status: str):
         )
 
 
+def test_poll_retries_transient_errors_until_completed():
+    seen = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["n"] += 1
+        if seen["n"] == 1:
+            raise httpx.ConnectError("reset")
+        if seen["n"] == 2:
+            return httpx.Response(503, text="busy")
+        return httpx.Response(
+            200,
+            json={"id": "vid-1", "status": "completed", "usage": {"cost": 0.4}},
+        )
+
+    ticks = {"t": 0.0}
+
+    def sleep(seconds: float) -> None:
+        ticks["t"] += seconds
+
+    payload = poll_video_job(
+        _client(handler),
+        "vid-1",
+        key="test-key",
+        timeout_s=60,
+        interval_s=15,
+        sleep=sleep,
+        clock=lambda: ticks["t"],
+    )
+    assert payload["status"] == "completed"
+    assert payload["usage"]["cost"] == 0.4
+    assert seen["n"] == 3
+
+
+def test_poll_does_not_retry_client_errors():
+    seen = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["n"] += 1
+        return httpx.Response(400, text="bad duration")
+
+    with pytest.raises(RuntimeError, match="400"):
+        poll_video_job(
+            _client(handler),
+            "vid-1",
+            key="test-key",
+            sleep=lambda _s: None,
+            clock=lambda: 0.0,
+            timeout_s=100,
+        )
+    assert seen["n"] == 1
+
+
 def test_poll_timeout():
     ticks = {"t": 0.0}
 
@@ -468,3 +520,50 @@ def test_mock_higgsfield_still_uses_frame_swap(tmp_path: Path, monkeypatch):
         method="wan",
     )
     assert called == {"wan": 0, "frame": 1}
+
+
+def test_mock_clamps_finder_window_to_frame_cap(tmp_path: Path, monkeypatch):
+    """Gemini shot windows can exceed 5s. Mock must not reject them."""
+    monkeypatch.setenv("MOCK_HIGGSFIELD", "1")
+    monkeypatch.delenv("SWAP_METHOD", raising=False)
+    monkeypatch.setattr("product_placement.jobs.data_root", lambda: tmp_path)
+    seen: dict = {}
+
+    def fake_extract(video, start, end, out_path, max_s=None):
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(out_path).write_bytes(b"clip")
+        return Path(out_path)
+
+    def fake_frame(**kwargs):
+        seen["start"] = kwargs["start_s"]
+        seen["end"] = kwargs["end_s"]
+        Path(kwargs["out_path"]).write_bytes(b"frame-mp4")
+        return {
+            "backend": "mock",
+            "request_id": "mock",
+            "billed_duration_s": 5,
+            "frame_path": "",
+            "edited_frame_path": "",
+            "start_s": kwargs["start_s"],
+            "end_s": kwargs["end_s"],
+        }
+
+    monkeypatch.setattr("product_placement.crop_stitch.extract_moment_clip", fake_extract)
+    monkeypatch.setattr("product_placement.frame_swap.run_frame_swap", fake_frame)
+    from product_placement.jobs import run_swap_job
+
+    status = run_swap_job(
+        "job3",
+        video_path=tmp_path / "v.mp4",
+        product_path=tmp_path / "p.png",
+        start_s=10,
+        end_s=22,
+        region={"x": 0, "y": 0, "w": 1, "h": 1},
+        target="green wine bottle",
+        confirm=True,
+        method="wan",
+    )
+    assert seen["start"] == pytest.approx(13.5)
+    assert seen["end"] == pytest.approx(18.5)
+    assert status["result"]["start_s"] == pytest.approx(13.5)
+    assert status["result"]["end_s"] == pytest.approx(18.5)
