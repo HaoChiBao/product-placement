@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react"
 import { Toast } from "@/components/ui/empty-state"
 import { cn } from "@/lib/utils"
 import { session } from "@/lib/catalog-client"
+import { FLOW_EVENT, getFlow, imageHref, researchDone, researchHref, type Flow } from "@/lib/flow"
 import type { BrandProfile } from "@/lib/research"
 
 const STEPS = [
@@ -21,13 +22,40 @@ export type Step = (typeof STEPS)[number][0]
 /** Steps before the brand is saved; a session from an earlier run would be stale here. */
 const PRE_BRAND: Step[] = ["onboard", "research", "image"]
 
+/** Where each finished step reopens. Research and image reopen the saved run (no new research). */
+function stepHrefs(flow: Flow | null): Partial<Record<Step, string>> {
+  const hrefs: Partial<Record<Step, string>> = { onboard: "/" }
+  if (flow && researchDone(flow)) {
+    hrefs.research = researchHref(flow)
+    hrefs.image = imageHref(flow)
+  }
+  if (flow?.brandId) hrefs.videos = "/videos"
+  return hrefs
+}
+
 export function TopBar({ step, nav }: { step?: Step; nav?: "videos" | "campaigns" | "watch" }) {
   const [profile, setProfile] = useState<BrandProfile | null>(null)
+  const [flow, setFlowState] = useState<Flow | null>(null)
   useEffect(() => {
-    if (step && PRE_BRAND.includes(step)) return
-    setProfile(session.get()?.profile || null)
+    const sync = () => {
+      const f = getFlow()
+      const s = session.get()
+      setFlowState(f)
+      // Show the brand once it's saved in this run; on pre-brand steps an older
+      // session (from a previous run) would be stale.
+      const saved = Boolean(s && f?.brandId && f.brandId === s.brandId)
+      const pastOnboarding = !step || !PRE_BRAND.includes(step)
+      setProfile(s && (saved || pastOnboarding) ? s.profile : null)
+    }
+    sync()
+    // A new research run resets the flow; drop the old run's step links.
+    window.addEventListener(FLOW_EVENT, sync)
+    return () => window.removeEventListener(FLOW_EVENT, sync)
   }, [step])
   const idx = STEPS.findIndex((s) => s[0] === step)
+  const hrefs = stepHrefs(flow)
+  // Steps finished in this run: research done → 2, brand saved → 3.
+  const finished = flow?.brandId ? 3 : researchDone(flow) ? 2 : 0
 
   return (
     <header className="sticky top-0 z-20 border-b border-border bg-background/88 backdrop-blur-[10px]">
@@ -66,29 +94,47 @@ export function TopBar({ step, nav }: { step?: Step; nav?: "videos" | "campaigns
       </div>
       {step ? (
         <div className="mx-auto flex max-w-shell items-center gap-1.5 overflow-x-auto px-4 pb-3 text-[12.5px] sm:px-6">
-          {STEPS.map(([key, label], i) => (
-            <span key={key} className="contents">
-              {i ? <span className="h-px w-7 shrink-0 bg-border" /> : null}
-              <span
-                className={cn(
-                  "flex shrink-0 items-center gap-1.5 whitespace-nowrap text-faint",
-                  i < idx && "text-muted-foreground",
-                  i === idx && "font-semibold text-foreground"
-                )}
-              >
+          {STEPS.map(([key, label], i) => {
+            const done = i !== idx && (i < idx || i < finished)
+            const href = i !== idx ? hrefs[key] : undefined
+            const body = (
+              <>
                 <i
                   className={cn(
                     "grid size-[18px] place-items-center rounded-full border border-current font-mono text-[10px] not-italic",
-                    i < idx && "border-accent bg-accent text-white",
+                    done && "border-accent bg-accent text-white",
                     i === idx && "border-foreground bg-foreground text-background"
                   )}
                 >
-                  {i < idx ? "✓" : i + 1}
+                  {done ? "✓" : i + 1}
                 </i>
                 {label}
+              </>
+            )
+            const cls = cn(
+              "flex shrink-0 items-center gap-1.5 whitespace-nowrap text-faint",
+              done && "text-muted-foreground",
+              i === idx && "font-semibold text-foreground"
+            )
+            return (
+              <span key={key} className="contents">
+                {i ? <span className="h-px w-7 shrink-0 bg-border" /> : null}
+                {href ? (
+                  <Link
+                    href={href}
+                    className={cn(cls, "rounded-sm transition-colors duration-150 hover:text-foreground")}
+                    title={`Back to ${label.toLowerCase()}`}
+                  >
+                    {body}
+                  </Link>
+                ) : (
+                  <span className={cls} aria-current={i === idx ? "step" : undefined}>
+                    {body}
+                  </span>
+                )}
               </span>
-            </span>
-          ))}
+            )
+          })}
         </div>
       ) : null}
     </header>
