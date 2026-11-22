@@ -1,5 +1,6 @@
 import Link from "next/link"
 
+import { BrandMark } from "@/components/brand-mark"
 import { cn } from "@/lib/utils"
 
 export function WatchChrome({
@@ -11,14 +12,7 @@ export function WatchChrome({
 }) {
   return (
     <header className="sticky top-0 z-30 flex items-center gap-4 border-b border-border bg-background/78 px-4 py-3.5 backdrop-blur-[14px] sm:px-10">
-      <Link
-        href="/"
-        className="inline-flex items-center gap-2 font-display text-lg font-bold tracking-tight"
-        aria-label="Inset home"
-      >
-        <span className="logo-mark" aria-hidden />
-        Inset
-      </Link>
+      <BrandMark />
       <nav className="ml-2 hidden items-center gap-1 md:flex" aria-label="Watch">
         <Link
           href="/watch"
