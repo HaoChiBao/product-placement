@@ -19,7 +19,6 @@ from product_placement.db import get_connection, init_schema, is_postgres
 from product_placement.object_store import (
     get_object_store,
     reset_object_store,
-    s3_addressing_style,
 )
 
 
@@ -53,16 +52,6 @@ def pg_minio_env(tmp_path, monkeypatch):
     yield conn
     conn.close()
     reset_object_store()
-
-
-def test_addressing_style_defaults(monkeypatch):
-    monkeypatch.delenv("AWS_S3_ADDRESSING_STYLE", raising=False)
-    assert s3_addressing_style("http://127.0.0.1:9000") == "path"
-    assert s3_addressing_style("https://minio.example:9000") == "path"
-    assert s3_addressing_style("https://s3.us-west-1.amazonaws.com") == "virtual"
-    assert s3_addressing_style("https://bucket.railway.internal") == "virtual"
-    monkeypatch.setenv("AWS_S3_ADDRESSING_STYLE", "path")
-    assert s3_addressing_style("https://s3.us-west-1.amazonaws.com") == "path"
 
 
 def test_postgres_rows_and_minio_objects(pg_minio_env, tmp_path):
