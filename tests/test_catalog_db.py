@@ -243,6 +243,13 @@ def test_create_title_episode_moment_brand_placement(catalog_env, tmp_path):
     assert requeued["status"] == "queued"
     assert requeued.get("spawn") is True
 
+    # Review page: approve is a yes/no call; nothing is queued.
+    other = upsert_placement(conn, brand_id=brand["id"], moment_id=moment["id"], status="rejected")
+    yes = upsert_placement(conn, brand_id=brand["id"], moment_id=moment["id"], status="approved", generate=False)
+    assert yes["id"] == other["id"]
+    assert yes["status"] == "approved"
+    assert yes.get("spawn") is False
+
     moments = list_moments(conn, episode_id=ep["id"], brand_id=brand["id"])
     assert len(moments) == 1
     assert "brand_fit" in moments[0]

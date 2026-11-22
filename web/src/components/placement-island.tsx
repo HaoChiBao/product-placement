@@ -11,7 +11,7 @@ import {
   useDynamicIslandSize,
 } from "@/components/ui/dynamic-island"
 
-export type IslandStatus = "pending" | "generating" | "ready" | "rejected" | "failed"
+export type IslandStatus = "pending" | "generating" | "approved" | "ready" | "rejected" | "failed"
 
 type Props = {
   status: IslandStatus
@@ -55,9 +55,15 @@ function IslandBody({ status, index, total, what, message }: Props) {
   }
 
   const dot =
-    status === "ready" ? "bg-success" : status === "rejected" ? "bg-[#e5484d]" : "bg-white/40"
+    status === "ready" || status === "approved" ? "bg-success" : status === "rejected" ? "bg-[#e5484d]" : "bg-white/40"
   const label =
-    status === "ready" ? "Placement ready" : status === "rejected" ? "Rejected · original kept" : "Awaiting your call"
+    status === "approved"
+      ? "✓ Approved"
+      : status === "ready"
+        ? "Placement ready"
+        : status === "rejected"
+          ? "✕ Rejected"
+          : "Awaiting your call"
 
   return (
     <DynamicContainer className="flex h-full w-full items-center justify-between gap-3 px-4 text-white">

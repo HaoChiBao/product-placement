@@ -14,7 +14,6 @@ import { playbackEnd, playbackOrigin } from "@/lib/clip-window"
 import {
   decidePlacement,
   fmt,
-  getGenerationInfo,
   isScanned,
   getVideo,
   listBrandMoments,
@@ -26,7 +25,6 @@ import {
   startBrandScan,
   type BrandScan,
   type CatalogMoment,
-  type GenerationInfo,
   type Placement,
   type Video,
 } from "@/lib/catalog-client"
@@ -36,14 +34,17 @@ type Status = Placement["status"] | "pending"
 
 const STATUS_LABEL: Record<Status, string> = {
   pending: "Pending",
-  approved: "Queued",
+  approved: "Approved",
   queued: "Queued",
   rendering: "Generating",
   ready: "Ready",
   rejected: "Rejected",
   failed: "Failed",
 }
-const IN_FLIGHT: Status[] = ["approved", "queued", "rendering"]
+// Approve/reject is a yes/no call (no swap). Queued/rendering only appear on
+// placements generated before that.
+const IN_FLIGHT: Status[] = ["queued", "rendering"]
+const APPROVED: Status[] = ["approved", "ready", "queued", "rendering"]
 
 function statusLabel(st: Status, p?: Placement): string {
   if (st === "queued" && p?.error?.toLowerCase().includes("key missing")) {
@@ -53,8 +54,8 @@ function statusLabel(st: Status, p?: Placement): string {
 }
 
 function statusBadgeVariant(st: Status): "muted" | "accent" | "warning" | "danger" {
-  if (st === "ready") return "accent"
-  if (st === "queued" || st === "rendering" || st === "approved") return "warning"
+  if (st === "ready" || st === "approved") return "accent"
+  if (st === "queued" || st === "rendering") return "warning"
   if (st === "rejected" || st === "failed") return "danger"
   return "muted"
 }
@@ -85,7 +86,6 @@ export default function ReviewPage() {
   const [playing, setPlaying] = useState(false)
   const [holding, setHolding] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
-  const [gen, setGen] = useState<GenerationInfo | null>(null)
   const [scan, setScan] = useState<BrandScan | null | undefined>(undefined)
   const [brandName, setBrandName] = useState("")
   const [toast, showToast] = useToast()
@@ -136,7 +136,6 @@ export default function ReviewPage() {
       .then((v) => (v ? setVideo(v) : setError("This video no longer exists.")))
       .catch((e) => setError(String(e.message || e)))
     refresh(s.brandId).catch((e) => setError(String(e.message || e)))
-    getGenerationInfo().then(setGen).catch(() => setGen(null))
   }, [titleId, episodeId, router, refresh])
 
   const statusOf = useCallback((m: CatalogMoment): Status => placements[m.id]?.status || "pending", [placements])
@@ -218,18 +217,8 @@ export default function ReviewPage() {
     try {
       const p = await decidePlacement(brandId, mm.id, status)
       setPlacements((ps) => ({ ...ps, [mm.id]: p }))
+      showToast(status === "approved" ? "✓ Approved" : "✕ Rejected")
       if (status === "approved") {
-        const err = p.error?.toLowerCase() || ""
-        const held = err.includes("key missing")
-        showToast(
-          held
-            ? err.includes("higgsfield")
-              ? "Queued — generation waiting on Higgsfield API key"
-              : err.includes("s3")
-                ? "Queued — generation waiting on S3"
-                : "Queued — generation waiting on OpenRouter API key"
-            : "Placing your product in this moment…"
-        )
         await saveCampaign({ brandId, episodeId, titleId, status: "in_progress" }).catch(() => {})
       }
     } catch (e) {
@@ -256,14 +245,13 @@ export default function ReviewPage() {
   const counts = list.reduce(
     (c, x) => {
       const s = statusOf(x)
-      if (s === "ready") c.ready++
+      if (APPROVED.includes(s)) c.approved++
       else if (s === "rejected") c.rejected++
-      else if (IN_FLIGHT.includes(s)) c.flight++
       else if (s === "failed") c.failed++
       else c.pending++
       return c
     },
-    { ready: 0, rejected: 0, flight: 0, failed: 0, pending: 0 }
+    { approved: 0, rejected: 0, failed: 0, pending: 0 }
   )
 
   const frame = m ? mediaUrl(m.frame_key) : null
@@ -316,8 +304,11 @@ export default function ReviewPage() {
               ) : null}
 
               {!showClip && box && !playing ? (
-                <div className="det" style={box}>
-                  <span>{m?.whats_there || "spot"}</span>
+                <div className="det" data-st={st} style={box}>
+                  <span>
+                    {st === "approved" ? "✓ " : st === "rejected" ? "✕ " : ""}
+                    {m?.whats_there || "spot"}
+                  </span>
                 </div>
               ) : null}
 
@@ -332,7 +323,7 @@ export default function ReviewPage() {
                   status={
                     IN_FLIGHT.includes(st)
                       ? "generating"
-                      : st === "ready" || st === "rejected" || st === "failed"
+                      : st === "approved" || st === "ready" || st === "rejected" || st === "failed"
                         ? st
                         : "pending"
                   }
@@ -403,10 +394,8 @@ export default function ReviewPage() {
               <span className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-stage-muted">
                 <i className="ml-2 size-2 rounded-sm bg-stage-muted not-italic" />
                 Pending
-                <i className="ml-2 size-2 rounded-sm bg-[#e6a24a] not-italic" />
-                Generating
                 <i className="ml-2 size-2 rounded-sm bg-success not-italic" />
-                Ready
+                Approved
                 <i className="ml-2 size-2 rounded-sm bg-[#e5484d] not-italic" />
                 Rejected
               </span>
@@ -526,7 +515,7 @@ export default function ReviewPage() {
                   className={cn(
                     "flex flex-col gap-2.5 rounded-md border-[1.5px] border-border bg-card p-2.5 text-left",
                     i === cur && "border-foreground",
-                    s === "ready" && "border-success",
+                    (s === "approved" || s === "ready") && "border-success",
                     (s === "rejected" || s === "failed") && "border-destructive"
                   )}
                 >
@@ -562,27 +551,19 @@ export default function ReviewPage() {
                       type="button"
                       className={cn(
                         "flex-1 rounded-sm border border-border bg-card px-2 py-[7px] text-[12.5px] font-medium disabled:cursor-not-allowed disabled:opacity-50",
-                        (s === "ready" ||
-                          (IN_FLIGHT.includes(s) && !placements[x.id]?.error)) &&
-                          "border-accent bg-accent text-white"
+                        APPROVED.includes(s) && "border-success bg-success text-white disabled:opacity-100"
                       )}
-                      aria-pressed={
-                        s === "ready" || (IN_FLIGHT.includes(s) && !placements[x.id]?.error)
-                      }
-                      disabled={
-                        busy === x.id ||
-                        s === "ready" ||
-                        (IN_FLIGHT.includes(s) && !placements[x.id]?.error)
-                      }
+                      aria-pressed={APPROVED.includes(s)}
+                      disabled={busy === x.id || APPROVED.includes(s)}
                       onClick={() => decide(x, "approved")}
                     >
-                      ✓ {s === "failed" || placements[x.id]?.error ? "Retry" : "Approve"}
+                      ✓ {APPROVED.includes(s) ? "Approved" : "Approve"}
                     </button>
                     <button
                       type="button"
                       className={cn(
                         "flex-1 rounded-sm border border-border bg-card px-2 py-[7px] text-[12.5px] font-medium disabled:cursor-not-allowed disabled:opacity-50",
-                        s === "rejected" && "border-destructive bg-destructive text-white"
+                        s === "rejected" && "border-destructive bg-destructive text-white disabled:opacity-100"
                       )}
                       aria-pressed={s === "rejected"}
                       disabled={busy === x.id || s === "rejected"}
@@ -599,8 +580,7 @@ export default function ReviewPage() {
           <div className="flex flex-col gap-2.5 border-t border-border px-4 py-3.5">
             <div className="flex justify-between gap-3 text-[13px]">
               <span>
-                {counts.ready} ready · {counts.flight} generating · {counts.rejected} rejected ·{" "}
-                {counts.pending} pending
+                {counts.approved} approved · {counts.rejected} rejected · {counts.pending} pending
               </span>
             </div>
             <ButtonLink
@@ -617,19 +597,7 @@ export default function ReviewPage() {
                 : "Done, view campaigns"}
             </ButtonLink>
             <p className="text-xs leading-[1.45] text-muted-foreground">
-              {!gen
-                ? "Approving queues generation."
-                : gen.ready
-                  ? gen.method === "higgsfield"
-                    ? "Approving runs the real placement pipeline (Qwen edit + Seedance)."
-                    : "Approving runs a full-clip Wan 3.0 swap."
-                  : gen.mock
-                    ? null
-                    : gen.method === "higgsfield"
-                      ? "Approving queues generation. Without a Higgsfield API key the placement stays queued — no fake clip is created."
-                      : (gen.reason || "").toLowerCase().includes("s3")
-                        ? "Approving queues generation. Without S3 the placement stays queued — no fake clip is created."
-                        : "Approving queues generation. Without an OpenRouter API key the placement stays queued — no fake clip is created."}
+              Approve the spots that fit your product and reject the rest. Nothing is placed in the video yet.
             </p>
           </div>
         </aside>
