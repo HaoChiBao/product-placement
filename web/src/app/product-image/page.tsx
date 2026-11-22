@@ -31,6 +31,7 @@ const SOURCE_LABEL: Record<ResearchImage["source"], string> = {
   agent: "Product page",
   shopify: "Shop listing",
   img: "Your site",
+  retailer: "Retailer listing",
 }
 
 type Choice = { kind: "candidate"; name: string } | { kind: "own" } | null
@@ -185,9 +186,9 @@ function ProductImage() {
                   selected={choice?.kind === "candidate" && choice.name === img.name}
                   onClick={() => setChoice({ kind: "candidate", name: img.name })}
                   src={`/api/jobs/${encodeURIComponent(jobId)}/file/${img.name}`}
-                  label={SOURCE_LABEL[img.source] || "Your site"}
+                  label={img.host ? `Found on ${img.host}` : SOURCE_LABEL[img.source] || "Your site"}
                   detail={`${img.w}×${img.h}`}
-                  badge={img.cutout ? "Transparent" : undefined}
+                  badge={img.multipack ? "Multipack" : img.cutout ? "Transparent" : undefined}
                 />
               ))}
               <button

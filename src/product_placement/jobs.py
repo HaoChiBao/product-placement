@@ -862,6 +862,9 @@ def run_research_job(
             product_url=product_url,
             http=image_http,
             clip=clip,
+            business=business,
+            search=tf.search,
+            search_results=found.get("results") or [],
         )
         n = len(images)
         steps[2]["detail"] = f"{n} product image{'' if n == 1 else 's'} found" if n else "No usable product image"

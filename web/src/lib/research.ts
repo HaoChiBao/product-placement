@@ -37,8 +37,12 @@ export type BrandProfile = {
 /** A cleaned product image the research job saved as `candidate_<n>.png` (best first). */
 export type ResearchImage = {
   name: string
-  source: "agent" | "shopify" | "img"
+  source: "agent" | "shopify" | "img" | "retailer"
   url: string
+  /** Retailer the image was found on (source "retailer"), e.g. "walmart.com". */
+  host?: string
+  /** Named or listed as a pack (e.g. "12-pack"); ranked below single units. */
+  multipack?: boolean
   w: number
   h: number
   /** True when the background was removed (transparent PNG). */
