@@ -23,6 +23,7 @@ from product_placement.catalog import (
     import_movies_from_store,
     import_movies_with_lock,
     insert_moment,
+    list_campaigns,
     list_episodes,
     list_moments,
     list_titles,
@@ -31,6 +32,8 @@ from product_placement.catalog import (
     register_preloaded_episode,
     seed_blender_open_movies,
     slugify,
+    update_placement,
+    upsert_campaign,
     upsert_placement,
 )
 from product_placement.catalog_keys import (
@@ -87,6 +90,7 @@ def test_init_schema_sqlite(catalog_env):
         "brands",
         "brand_assets",
         "placements",
+        "campaigns",
     } <= names
 
 
@@ -242,6 +246,92 @@ def test_create_title_episode_moment_brand_placement(catalog_env, tmp_path):
     moments = list_moments(conn, episode_id=ep["id"], brand_id=brand["id"])
     assert len(moments) == 1
     assert "brand_fit" in moments[0]
+
+
+def test_campaign_draft_then_live(catalog_env):
+    conn, data = catalog_env
+    title = create_title(conn, name="Camp Film", kind="movie")
+    vkey = catalog_video_key(title["slug"], 1, 1)
+    get_object_store().put_bytes(b"not-a-real-mp4", vkey, content_type="video/mp4")
+    ep = create_episode(
+        conn,
+        title_id=title["id"],
+        name="Pilot",
+        season=1,
+        episode=1,
+        video_key=vkey,
+        duration_s=5.0,
+        suggest_status="ready",
+    )
+    brand = create_brand(conn, name="Brand X", brief="cups")
+    draft = upsert_campaign(
+        conn,
+        brand_id=brand["id"],
+        episode_id=ep["id"],
+        title_id=title["id"],
+        status="draft",
+    )
+    assert draft["status"] == "draft"
+    assert list_campaigns(conn, brand_id=brand["id"])[0]["id"] == draft["id"]
+
+    moment = insert_moment(
+        conn,
+        episode_id=ep["id"],
+        start_s=1.0,
+        end_s=4.0,
+        region={"x": 1, "y": 1, "w": 10, "h": 10},
+        whats_there="cup",
+        score=0.9,
+    )
+    pl = upsert_placement(
+        conn, brand_id=brand["id"], moment_id=moment["id"], status="approved"
+    )
+    assert pl["spawn"] is True
+    moved = upsert_campaign(
+        conn, brand_id=brand["id"], episode_id=ep["id"], status="draft"
+    )
+    assert moved["status"] == "in_progress"
+
+    update_placement(conn, pl["id"], status="ready", clip_key="catalog/x/clip.mp4")
+    live = upsert_campaign(conn, brand_id=brand["id"], episode_id=ep["id"])
+    assert live["status"] == "live"
+
+
+def test_queued_with_error_can_retry_spawn(catalog_env):
+    conn, data = catalog_env
+    title = create_title(conn, name="Retry Film", kind="movie")
+    vkey = catalog_video_key(title["slug"], 1, 1)
+    get_object_store().put_bytes(b"x", vkey, content_type="video/mp4")
+    ep = create_episode(
+        conn,
+        title_id=title["id"],
+        name="E1",
+        season=1,
+        episode=1,
+        video_key=vkey,
+        duration_s=4.0,
+        suggest_status="ready",
+    )
+    brand = create_brand(conn, name="Brand Y", brief="x")
+    moment = insert_moment(
+        conn,
+        episode_id=ep["id"],
+        start_s=0.5,
+        end_s=3.5,
+        region={"x": 0, "y": 0, "w": 8, "h": 8},
+        whats_there="table",
+        score=0.5,
+    )
+    pl = upsert_placement(
+        conn, brand_id=brand["id"], moment_id=moment["id"], status="approved"
+    )
+    update_placement(conn, pl["id"], error="Generation queued: key missing")
+    again = upsert_placement(
+        conn, brand_id=brand["id"], moment_id=moment["id"], status="approved"
+    )
+    assert again["status"] == "queued"
+    assert again.get("spawn") is True
+    assert again.get("error") in (None, "")
 
 
 def test_object_store_local_put_get_range(catalog_env):

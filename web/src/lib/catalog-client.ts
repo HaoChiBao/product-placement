@@ -51,6 +51,23 @@ export type Placement = {
   updated_at?: string
 }
 
+export type Campaign = {
+  id: string
+  brand_id: string
+  title_id: string
+  episode_id: string
+  status: "draft" | "in_progress" | "live"
+  created_at?: string
+  updated_at?: string
+}
+
+export type GenerationInfo = {
+  ready: boolean
+  mock: boolean
+  keysConfigured: boolean
+  reason?: string | null
+}
+
 export type Video = Episode & { title: Title }
 
 async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -150,7 +167,7 @@ export async function listPlacements(brandId: string, episodeId?: string): Promi
   return placements || []
 }
 
-/** Approving queues a swap render (test mode = mock swap, no Seedance spend). */
+/** Approving queues the real placement-swap path when keys allow; otherwise holds queued. */
 export async function decidePlacement(
   brandId: string,
   momentId: string,
@@ -159,8 +176,40 @@ export async function decidePlacement(
   return getJson<Placement>("/api/catalog/placements", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ brandId, momentId, status, testMode: true, confirm: true }),
+    body: JSON.stringify({ brandId, momentId, status, confirm: true }),
   })
+}
+
+export async function listCampaigns(brandId: string): Promise<Campaign[]> {
+  const { campaigns } = await getJson<{ campaigns: Campaign[] }>(
+    `/api/catalog/campaigns?brandId=${encodeURIComponent(brandId)}`
+  )
+  return campaigns || []
+}
+
+export async function saveCampaign(input: {
+  brandId: string
+  episodeId: string
+  titleId?: string
+  status?: Campaign["status"]
+}): Promise<Campaign> {
+  return getJson<Campaign>("/api/catalog/campaigns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  })
+}
+
+export async function getGenerationInfo(): Promise<GenerationInfo> {
+  const data = await getJson<{ generation?: GenerationInfo }>("/api/health")
+  return (
+    data.generation || {
+      ready: false,
+      mock: false,
+      keysConfigured: false,
+      reason: "Generation status unavailable",
+    }
+  )
 }
 
 export async function createBrand(name: string, brief: string, asset?: File | null) {

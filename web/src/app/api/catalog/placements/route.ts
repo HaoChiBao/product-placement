@@ -5,6 +5,7 @@ import {
   ensureCatalogDb,
   spawnPlacementSwap,
 } from "@/lib/catalog"
+import { planGeneration } from "@/lib/generation"
 
 export const runtime = "nodejs"
 export const maxDuration = 60
@@ -43,18 +44,19 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       )
     }
-    const testMode = body.testMode !== false
-    if (body.status === "approved" && !testMode && !body.confirm) {
+
+    const plan = planGeneration({ testMode: body.testMode })
+    if (body.status === "approved" && !plan.testMode && !body.confirm) {
       return NextResponse.json(
         {
           error:
-            "Paid placement requires confirm=true and testMode=false. Leave testMode=true for mock swaps.",
+            "Paid placement requires confirm=true. Pass testMode=true only for intentional mock swaps.",
         },
         { status: 400 }
       )
     }
 
-    const placement = catalogCmd([
+    let placement = catalogCmd([
       "upsert-placement",
       "--brand-id",
       body.brandId,
@@ -62,14 +64,32 @@ export async function POST(req: NextRequest) {
       body.momentId,
       "--status",
       body.status,
-    ]) as { id: string; status: string; spawn?: boolean }
+    ]) as {
+      id: string
+      status: string
+      spawn?: boolean
+      episode_id?: string
+      error?: string | null
+    }
 
-    // Only spawn when upsert newly transitioned into queued (not retries/double-clicks).
     if (placement.spawn) {
-      spawnPlacementSwap(placement.id, {
-        testMode,
-        confirm: true,
-      })
+      if (!plan.canSpawn) {
+        placement = catalogCmd([
+          "update-placement",
+          "--id",
+          placement.id,
+          "--error",
+          plan.holdError || "Generation queued: key missing",
+          "--test-mode",
+          "0",
+        ]) as typeof placement
+        placement.spawn = false
+      } else {
+        spawnPlacementSwap(placement.id, {
+          testMode: plan.testMode,
+          confirm: true,
+        })
+      }
     }
 
     return NextResponse.json(placement)

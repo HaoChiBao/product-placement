@@ -15,6 +15,7 @@ from product_placement.higgsfield import (
     UPLOAD_URL,
     HiggsfieldClient,
     HiggsfieldError,
+    auth_configured,
     auth_header,
     build_genjutsu_body,
     build_seedance_body,
@@ -35,6 +36,13 @@ def test_auth_header_from_hf_key():
 def test_auth_header_missing():
     with pytest.raises(HiggsfieldError):
         auth_header({})
+
+
+def test_auth_configured():
+    assert auth_configured({"HF_KEY": "a:b"})
+    assert auth_configured({"HF_API_KEY_ID": "id", "HF_API_KEY_SECRET": "sec"})
+    assert not auth_configured({})
+    assert not auth_configured({"HF_API_KEY_ID": "id"})
 
 
 def test_seedance_body_matches_verified_live_shape():
