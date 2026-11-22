@@ -360,7 +360,7 @@ export default function ReviewPage() {
                 Pending
                 <i className="ml-2 size-2 rounded-sm bg-[#e6a24a] not-italic" />
                 Generating
-                <i className="ml-2 size-2 rounded-sm bg-accent not-italic" />
+                <i className="ml-2 size-2 rounded-sm bg-success not-italic" />
                 Ready
                 <i className="ml-2 size-2 rounded-sm bg-[#e5484d] not-italic" />
                 Rejected
@@ -460,7 +460,7 @@ export default function ReviewPage() {
                   className={cn(
                     "flex flex-col gap-2.5 rounded-md border-[1.5px] border-border bg-card p-2.5 text-left",
                     i === cur && "border-foreground",
-                    s === "ready" && "border-accent",
+                    s === "ready" && "border-success",
                     (s === "rejected" || s === "failed") && "border-destructive"
                   )}
                 >

@@ -1,6 +1,7 @@
 import type { Config } from "tailwindcss"
 
 export default {
+  darkMode: "class",
   content: [
     "./src/pages/**/*.{js,ts,jsx,tsx,mdx}",
     "./src/components/**/*.{js,ts,jsx,tsx,mdx}",
@@ -23,6 +24,9 @@ export default {
         accent: "var(--accent)",
         "accent-foreground": "var(--accent-foreground)",
         "accent-soft": "var(--accent-soft)",
+        success: "var(--success)",
+        "success-foreground": "var(--success-foreground)",
+        "success-soft": "var(--success-soft)",
         warning: "var(--warning)",
         "warning-soft": "var(--warning-soft)",
         destructive: "var(--destructive)",

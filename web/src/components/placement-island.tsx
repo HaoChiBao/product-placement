@@ -55,7 +55,7 @@ function IslandBody({ status, index, total, what, message }: Props) {
   }
 
   const dot =
-    status === "ready" ? "bg-accent" : status === "rejected" ? "bg-[#e5484d]" : "bg-white/40"
+    status === "ready" ? "bg-success" : status === "rejected" ? "bg-[#e5484d]" : "bg-white/40"
   const label =
     status === "ready" ? "Placement ready" : status === "rejected" ? "Rejected · original kept" : "Awaiting your call"
 
