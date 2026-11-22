@@ -63,7 +63,7 @@ Brand-side flow (the only UI; the provider and watch APIs are unchanged):
 | `/research` | Brand research with TinyFish (`POST /api/research`, mock without `TINYFISH_API_KEY` or with `?mock=1`). The job also finds up to 3 product images (agent URL, Shopify JSON, page image links), keyed to transparent PNGs |
 | `/product-image` | Confirm the product image (or upload your own, or skip), then `POST /api/catalog/brands` |
 | `/videos` | Catalog episodes with their detected placement spots |
-| `/review/<titleId>/<episodeId>` | Time bar with every spot; approve queues `placement-swap` (real when Higgsfield keys are set; otherwise queued with key-missing — no fake clip) |
+| `/review/<titleId>/<episodeId>` | Time bar with every spot (rescanned for the brand on first visit); approve queues `placement-swap` (real when Higgsfield keys are set; otherwise queued with key-missing — no fake clip) |
 | `/campaigns` | Draft / in-progress / live campaigns from the DB |
 
 Flow notes: [docs/brand-flow.md](docs/brand-flow.md).
@@ -91,7 +91,9 @@ API routes spawn `python3 -m product_placement.jobs …` (uses `PYTHON_BIN` if s
 
 When `OPENROUTER_API_KEY` is set, suggest detects shots, takes about one full-resolution keyframe per second inside each shot (at least three, each at least 0.15s from a cut), and sends those frames to Gemini on OpenRouter in batches of about eight with low reasoning effort. The model returns existing objects an editor could swap for a branded product — bottles, glasses, cans, devices, and similar — and never an empty surface. Each object has a label, a category, a suggested swap-in product, a visibility, and a box in Gemini's 0–1000 `[ymin, xmin, ymax, xmax]` format. Boxes become pixels. Detections in one shot merge when they share a category and their boxes overlap, including when one box contains the other. If the object is seen on the first or last keyframe of the shot, the moment extends to that shot edge; otherwise it runs to the midpoint between keyframes. A single sighting below visibility 0.3 is dropped. The object label is the moment's `whats_there`, which the swap prompt uses. Progress goes to stderr. `MOMENT_MODEL` overrides the model (default `google/gemini-3.8-flash`).
 
-A brand passed to the CLI (`--brand`) or `run_suggest_job` adds that brand's product category (the first sentence of the brief) and its prefer/avoid rules to the prompt. Catalog episode-suggest stays brand-agnostic.
+A brand passed to the CLI (`--brand`) or `run_suggest_job` adds that brand's product category (the first sentence of the brief) and its prefer/avoid rules to the prompt.
+
+Catalog episodes are scanned twice. Upload runs `episode-suggest` once with no brand, so every brand sees spots right away. The first time a brand opens an episode on `/review`, the page calls `POST /api/catalog/brand-scan`, which spawns `brand-scan` (`run_brand_scan_job`): the same finder with that brand in the prompt. Its moments are stored with `moments.brand_id` and replace the shared ones for that brand once `brand_scans.status` is `ready`; shared moments the brand already approved or rejected stay listed. Each episode and brand pair is scanned once (about one finder run of OpenRouter usage); a failed scan can be retried from the review page, and a run stuck in `running` for 15 minutes is restarted on the next visit. Without `OPENROUTER_API_KEY` the brand scan uses the classical finder with the brand's prefer/avoid rules.
 
 Without the key, the classical path runs: shot cuts, YuNet faces, YOLOX props/surfaces, and optical-flow camera-motion rejection. ONNX weights download on first run into `checkpoints/`, `MODEL_CACHE_DIR`, or `~/.cache/product-placement/models/`.
 

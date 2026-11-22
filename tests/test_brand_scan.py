@@ -169,3 +169,36 @@ def test_rescans_only_replace_their_own_moments(catalog_env, tmp_path, monkeypat
     assert [(r[0], r[1]) for r in rows] == [("generic spot", None), ("soda spot", soda["id"])]
     assert "/brands/acme-cola/moments/" in rows[1][2]
     assert seen_brands == [None, "Acme Cola", None]
+
+
+def test_boot_key_migration_leaves_brand_frames_alone(catalog_env, tmp_path):
+    """migrate-catalog-keys runs on every boot; it must not renumber brand-scan frames."""
+    from product_placement.catalog import migrate_catalog_object_keys
+    from product_placement.catalog_keys import brand_moment_frame_key, moment_frame_key
+    from product_placement.object_store import get_object_store
+
+    conn = catalog_env
+    store = get_object_store()
+    ep = _episode(conn, tmp_path)
+    soda = create_brand(conn, name="Acme Cola", brief="Soda can.")
+
+    shared_key = moment_frame_key("scan-film", 1, 1, 1)
+    brand_key = brand_moment_frame_key("scan-film", 1, 1, "acme-cola", 1)
+    store.put_bytes(b"shared", shared_key, content_type="image/jpeg")
+    store.put_bytes(b"brand", brand_key, content_type="image/jpeg")
+    shared = insert_moment(conn, episode_id=ep["id"], start_s=0.5, end_s=1.0,
+                           region={"x": 1, "y": 1, "w": 5, "h": 5}, frame_key=shared_key)
+    brand = insert_moment(conn, episode_id=ep["id"], start_s=0.1, end_s=0.4,
+                          region={"x": 1, "y": 1, "w": 5, "h": 5}, frame_key=brand_key,
+                          brand_id=soda["id"])
+
+    migrate_catalog_object_keys(conn)
+    migrate_catalog_object_keys(conn)
+
+    keys = dict(conn.execute("SELECT id, frame_key FROM moments").fetchall())
+    assert keys[brand["id"]] == brand_key
+    assert keys[shared["id"]] == shared_key
+    with store.open_stream(shared_key) as fh:
+        assert fh.read() == b"shared"
+    with store.open_stream(brand_key) as fh:
+        assert fh.read() == b"brand"
