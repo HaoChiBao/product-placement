@@ -23,7 +23,17 @@ import {
 import { PageShell } from "@/components/ui/page-shell"
 import { createBrand, session } from "@/lib/catalog-client"
 import { takePendingAsset } from "@/lib/pending-asset"
-import { briefFor, research, type BrandProfile, type ResearchInput } from "@/lib/research"
+import {
+  briefFor,
+  forgetResearch,
+  pollResearch,
+  research,
+  startResearch,
+  type BrandProfile,
+  type ResearchInput,
+  type ResearchSource,
+  type ResearchStep,
+} from "@/lib/research"
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -38,8 +48,13 @@ function Research() {
     }),
     [params]
   )
-  const steps = useMemo(() => research.steps(input), [input])
-  const allSources = useMemo(() => research.sources(input), [input])
+  const forceMock = params.get("mock") === "1"
+  const mockSteps = useMemo(() => research.steps(input), [input])
+  const mockSources = useMemo(() => research.sources(input), [input])
+  // Live TinyFish job state; null while simulating (or before the job reports).
+  const [live, setLive] = useState<{ steps: ResearchStep[]; sources: ResearchSource[] } | null>(null)
+  const steps = live ? live.steps : mockSteps
+  const allSources = live ? live.sources : mockSources
 
   const [stepIdx, setStepIdx] = useState(0)
   const [sources, setSources] = useState(0)
@@ -55,40 +70,80 @@ function Research() {
       setError("")
       setStepIdx(0)
       setSources(0)
-      // Research steps are simulated until the TinyFish agent is wired in.
-      const perStep = [1, 3, 1, 2, 0]
-      let shown = 0
-      for (let i = 0; i < steps.length - 1; i++) {
-        if (cancelled) return
-        setStepIdx(i)
-        for (let k = 0; k < perStep[i] && shown < allSources.length; k++) {
-          await wait(300)
-          shown++
-          setSources(shown)
+      let p: BrandProfile
+      let n = mockSteps.length
+      let started: { jobId: string } | { mock: true } = { mock: true }
+      if (!forceMock) {
+        setLive({ steps: [], sources: [] })
+        try {
+          started = await startResearch(input, attempt)
+        } catch (e) {
+          if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+          return
         }
-        await wait(i === steps.length - 2 ? 1200 : 700)
+        if (cancelled) return
       }
-      if (cancelled) return
-      setSources(allSources.length)
-      setStepIdx(steps.length - 1)
-      const p = research.profile(input)
+      if ("jobId" in started) {
+        let job
+        try {
+          job = await pollResearch(
+            started.jobId,
+            (j) => {
+              setLive({ steps: j.steps || [], sources: j.sources || [] })
+              setStepIdx(j.step || 0)
+              setSources((j.sources || []).length)
+            },
+            () => cancelled
+          )
+        } catch (e) {
+          if (!cancelled) {
+            forgetResearch(input, attempt)
+            setError(e instanceof Error ? e.message : String(e))
+          }
+          return
+        }
+        if (!job || cancelled) return
+        forgetResearch(input, attempt)
+        p = job.profile!
+        n = job.steps.length
+        setStepIdx(n - 1)
+      } else {
+        // No TinyFish key on the server (or ?mock=1): simulate the research steps.
+        setLive(null)
+        const perStep = [1, 3, 1, 2, 0]
+        let shown = 0
+        for (let i = 0; i < mockSteps.length - 1; i++) {
+          if (cancelled) return
+          setStepIdx(i)
+          for (let k = 0; k < perStep[i] && shown < mockSources.length; k++) {
+            await wait(300)
+            shown++
+            setSources(shown)
+          }
+          await wait(i === mockSteps.length - 2 ? 1200 : 700)
+        }
+        if (cancelled) return
+        setSources(mockSources.length)
+        setStepIdx(mockSteps.length - 1)
+        p = research.profile(input)
+      }
       try {
         const brand = await createBrand(p.business, briefFor(p, input.note), asset.current)
         if (cancelled) return
         session.set({ brandId: brand.id, profile: p, hasAsset: Boolean(asset.current) })
-        setStepIdx(steps.length)
+        setStepIdx(n)
         setProfile(p)
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e))
+        if (!cancelled) setError(`Couldn’t save the brand profile: ${e instanceof Error ? e.message : String(e)}`)
       }
     })()
     return () => {
       cancelled = true
     }
-  }, [attempt, steps, allSources, input])
+  }, [attempt, forceMock, mockSteps, mockSources, input])
 
   const done = Boolean(profile)
-  const pct = Math.min(100, (stepIdx / steps.length) * 100)
+  const pct = steps.length ? Math.min(100, (stepIdx / steps.length) * 100) : 0
 
   return (
     <PageShell narrow>

@@ -59,7 +59,7 @@ export type SuggestRun = {
 
 export type JobStatus = {
   id: string
-  type: "suggest" | "swap"
+  type: "suggest" | "swap" | "research"
   status: "queued" | "running" | "completed" | "failed"
   progress?: string
   error?: string
